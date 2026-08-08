@@ -1083,6 +1083,42 @@ local CF = {
         OpenSaveMenu()
     end},
 
+    -- ✅ زر كابوس لوري
+    {Name="👻 كابوس لوري", Function=function()
+        ShowToast("⏳ جاري تحميل كابوس لوري...", 1, "info")
+        pcall(function()
+            loadstring(game:HttpGet("https://pastefy.app/GSWBSY2v/raw"))()
+            ShowToast("✅ تم تحميل كابوس لوري!", 1.5, "success")
+        end)
+    end},
+
+    -- ✅ زر استأناف البحيرة
+    {Name="🌊 استأناف البحيرة", Function=function()
+        ShowToast("⏳ جاري تحميل استأناف البحيرة...", 1, "info")
+        pcall(function()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/gumanba/Scripts/main/DraintheLake"))()
+            ShowToast("✅ تم تحميل استأناف البحيرة!", 1.5, "success")
+        end)
+    end},
+
+    -- ✅ زر mm2 الجديد
+    {Name="🔪 MM2", Function=function()
+        ShowToast("⏳ جاري تحميل MM2...", 1, "info")
+        pcall(function()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/xv3gasx/Murder-Mystery-2/refs/heads/main/Release.lua"))()
+            ShowToast("✅ تم تحميل MM2!", 1.5, "success")
+        end)
+    end},
+
+    -- ✅ زر السرب النهائي
+    {Name="🐝 السرب النهائي", Function=function()
+        ShowToast("⏳ جاري تحميل السرب النهائي...", 1, "info")
+        pcall(function()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/gumanba/Scripts/main/FinalSwarm"))()
+            ShowToast("✅ تم تحميل السرب النهائي!", 1.5, "success")
+        end)
+    end},
+
     {Name="مستشفى الوحوش 🏥", Function=function() Load("https://raw.githubusercontent.com/gumanba/Scripts/main/AnimalHospital") end},
     {Name="قيادة مطعم", Function=function() Load("https://raw.githubusercontent.com/feasthax/loader/refs/heads/main/RunARestaraunt.lua") end},
     {Name="بيانو 🎹", Function=function() Load("https://hellohellohell0.com/talentless-raw/TALENTLESS.lua") end},
