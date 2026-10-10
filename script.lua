@@ -1,21 +1,18 @@
 --[[
 ╔══════════════════════════════════════════════════╗
-║ HUSSEIN HUB v14.2 (Smooth UI) - MODDED          ║
-║ • دمج حفظ + انتقال في قائمة واحدة               ║
-║ • واجهة سرعة مستقلة                             ║
-║ • ✅ دعم مكانين للحفظ                           ║
-║ • ✅ تصغير قائمة الحفظ                          ║
-║ • ✅ مراقبة شخص قابلة للسحب                     ║
+║ HUSSEIN HUB v14.4 (Fixed)                        ║
+║ • NoClip، نقر انتقال، قفز، Rejoin، FOV، أماكن بأسماء      ║
 ╚══════════════════════════════════════════════════╝
 ]]
 
-local p = game.Players.LocalPlayer
+local Players = game:GetService("Players")
+local p = Players.LocalPlayer
 local U = game:GetService("UserInputService")
 local TS = game:GetService("TweenService")
 local RS = game:GetService("RunService")
-local HS = game:GetService("HttpService")
 local VU = game:GetService("VirtualUser")
-local g = "HusseinHub_v14.2"
+local g = "HusseinHub_v14.4"
+local PG = p:WaitForChild("PlayerGui")
 
 -- ─────────────────────────────────────────────────────
 -- SECTION 1 · GLOBAL STATE & CLEANUP
@@ -28,26 +25,18 @@ end
 getgenv().HusseinHubRunning = true
 getgenv().HusseinHub = getgenv().HusseinHub or {}
 local HUB = getgenv().HusseinHub
-HUB.state = HUB.state or {}
+HUB.state = {} -- ✅ يتصفّر كل تشغيل
 HUB.conns = {}
 HUB.instances = {}
 HUB.espConns = {}
 HUB.espData = {}
-HUB.loaded = HUB.loaded or {}
 HUB.lighting = nil
 HUB.originalWS = nil
 HUB.originalJP = nil
 HUB.uiVisible = true
 HUB.afkLast = 0
 
--- ✅ مكانين للحفظ
-getgenv().SavedPosition1 = getgenv().SavedPosition1 or nil
-getgenv().SavedPosition2 = getgenv().SavedPosition2 or nil
-
-local function TrackInst(inst)
-    table.insert(HUB.instances, inst)
-    return inst
-end
+getgenv().SavedPositions = getgenv().SavedPositions or {}
 
 local function NewInst(class, parent)
     local i = Instance.new(class)
@@ -75,34 +64,41 @@ local function SafeCall(fn, label)
     return ok, err
 end
 
+local function destroyESPObjects()
+    for plr, d in pairs(HUB.espData) do
+        pcall(function() if d.highlight then d.highlight:Destroy() end end)
+        pcall(function() if d.billboard then d.billboard:Destroy() end end)
+        HUB.espData[plr] = nil
+    end
+end
+
 local function CleanupAll()
     warn("🧹 تنظيف HusseinHub...")
     for _, c in ipairs(HUB.conns) do
-        pcall(function()
-            if c.Connected then c:Disconnect() end
-        end)
+        pcall(function() c:Disconnect() end)
     end
     HUB.conns = {}
     for _, c in ipairs(HUB.espConns) do
-        pcall(function()
-            c:Disconnect()
-        end)
+        pcall(function() c:Disconnect() end)
     end
     HUB.espConns = {}
+
+    destroyESPObjects() -- ✅ يحذف Highlight/Billboard من الشخصيات
+
+    -- ✅ إرجاع الكاميرا إذا كنت تراقب أحد
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        local hum = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+        if cam and hum then cam.CameraSubject = hum end
+    end)
+
     for _, i in ipairs(HUB.instances) do
         pcall(function()
             if i and i.Parent then i:Destroy() end
         end)
     end
     HUB.instances = {}
-    pcall(function()
-        local gui = p.PlayerGui:FindFirstChild(g.."_SaveLoad")
-        if gui then gui:Destroy() end
-    end)
-    pcall(function()
-        local gui2 = p.PlayerGui:FindFirstChild(g.."_SpeedUI")
-        if gui2 then gui2:Destroy() end
-    end)
+
     local char = p.Character
     if char then
         local h = char:FindFirstChildOfClass("Humanoid")
@@ -118,13 +114,27 @@ local function CleanupAll()
             end
         end)
     end
+
+    if HUB.restoreNoclip then pcall(HUB.restoreNoclip) end
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if HUB.fovOn and cam and HUB.originalFOV then
+            cam.FieldOfView = HUB.originalFOV
+        end
+    end)
+    HUB.fovOn = false
+    HUB.fullbright = false
+
+    HUB.state = {} -- ✅ يمسح الحالة
+    HUB.infJumpConn, HUB.afkIdleConn, HUB.afkLoopConn, HUB.espGui = nil, nil, nil, nil
+    HUB.noclipConn, HUB.ctpConns = nil, nil
     getgenv().HusseinHubRunning = false
     print("✅ تم التنظيف")
 end
 getgenv().HusseinHubCleanup = CleanupAll
 
 -- ─────────────────────────────────────────────────────
--- SECTION 2 · SAVE/LOAD POSITION CORE
+-- SECTION 2 · CORE
 -- ─────────────────────────────────────────────────────
 
 local function GetHRP()
@@ -136,7 +146,7 @@ end
 -- SECTION 3 · TOAST SYSTEM
 -- ─────────────────────────────────────────────────────
 
-local ToastGui = NewInst("ScreenGui", p.PlayerGui)
+local ToastGui = NewInst("ScreenGui", PG)
 ToastGui.Name = g.."_Toasts"
 ToastGui.ResetOnSpawn = false
 ToastGui.DisplayOrder = 9999
@@ -224,9 +234,7 @@ local function ShowToast(text, duration, kind)
     while #activeToasts > 4 do
         local rem = table.remove(activeToasts)
         if rem and rem.frame then
-            pcall(function()
-                rem.frame:Destroy()
-            end)
+            pcall(function() rem.frame:Destroy() end)
         end
     end
     relayoutToasts()
@@ -245,81 +253,64 @@ local function ShowToast(text, duration, kind)
                     break
                 end
             end
-            pcall(function()
-                frame:Destroy()
-            end)
+            pcall(function() frame:Destroy() end)
             relayoutToasts()
         end
     end)
 end
 
 -- ─────────────────────────────────────────────────────
--- SECTION 3.5 · SAVE/LOAD FUNCTIONS (مكانين)
+-- SECTION 3.5 · SAVE/LOAD POSITIONS
 -- ─────────────────────────────────────────────────────
 
-local function SavePos1()
-    local hrp = GetHRP()
-    getgenv().SavedPosition1 = hrp.CFrame
-    ShowToast("✅ تم حفظ المكان 1", 1, "success")
-    print("✅ تم حفظ المكان 1")
-end
-
-local function SavePos2()
-    local hrp = GetHRP()
-    getgenv().SavedPosition2 = hrp.CFrame
-    ShowToast("✅ تم حفظ المكان 2", 1, "success")
-    print("✅ تم حفظ المكان 2")
-end
-
-local function LoadPos1()
-    if getgenv().SavedPosition1 then
-        local hrp = GetHRP()
-        hrp.CFrame = getgenv().SavedPosition1
-        ShowToast("✅ تم الانتقال للمكان 1", 1, "success")
-        print("✅ تم الانتقال للمكان 1")
-    else
-        ShowToast("❌ لم يتم حفظ المكان 1", 1.5, "error")
-        warn("❌ لم يتم حفظ المكان 1")
+-- الأماكن محفوظة لكل لعبة (PlaceId) داخل getgenv
+local function placeList()
+    local all = getgenv().SavedPositions
+    if type(all) ~= "table" then
+        all = {}
+        getgenv().SavedPositions = all
     end
-end
-
-local function LoadPos2()
-    if getgenv().SavedPosition2 then
-        local hrp = GetHRP()
-        hrp.CFrame = getgenv().SavedPosition2
-        ShowToast("✅ تم الانتقال للمكان 2", 1, "success")
-        print("✅ تم الانتقال للمكان 2")
-    else
-        ShowToast("❌ لم يتم حفظ المكان 2", 1.5, "error")
-        warn("❌ لم يتم حفظ المكان 2")
-    end
+    all[game.PlaceId] = all[game.PlaceId] or {}
+    return all[game.PlaceId]
 end
 
 -- ─────────────────────────────────────────────────────
 -- SECTION 4 · DRAG HELPER + MAIN UI
 -- ─────────────────────────────────────────────────────
 
+-- ✅ الاتصالات تنفصل عند حذف الواجهة، ويرجع دالة تقول هل كان سحب (لتجنب الضغط بالغلط)
 local function MakeDraggable(obj, handle)
     handle = handle or obj
-    local dragging, dragStart, startPos
-    Connect(handle.InputBegan, function(i)
+    local dragging, moved = false, false
+    local dragStart, startPos
+    local mine = {}
+    local function add(c) table.insert(mine, TrackConn(c)) end
+
+    add(handle.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
             dragging = true
+            moved = false
             dragStart = i.Position
             startPos = obj.Position
         end
-    end)
-    Connect(U.InputChanged, function(i)
+    end))
+    add(U.InputChanged:Connect(function(i)
         if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
             local d = i.Position - dragStart
+            if d.Magnitude > 6 then moved = true end
             obj.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
         end
-    end)
-    Connect(U.InputEnded, function(i)
+    end))
+    add(U.InputEnded:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
             dragging = false
         end
+    end))
+    obj.Destroying:Connect(function()
+        for _, c in ipairs(mine) do pcall(function() c:Disconnect() end) end
     end)
+
+    return function() return moved end
 end
 
 HUB.lighting = {
@@ -332,7 +323,7 @@ HUB.lighting = {
     GlobalShadows = game.Lighting.GlobalShadows,
 }
 
-local S = NewInst("ScreenGui", p.PlayerGui)
+local S = NewInst("ScreenGui", PG)
 S.Name = g
 S.ResetOnSpawn = false
 S.DisplayOrder = 100
@@ -373,7 +364,7 @@ L.Size = UDim2.new(0, 220, 1, 0)
 L.Font = Enum.Font.GothamBold
 L.TextColor3 = Color3.fromRGB(255,255,0)
 L.TextSize = 16
-L.Text = "HUSSEIN HUB v14.2 ⭐"
+L.Text = "HUSSEIN HUB v14.4 ⭐"
 L.TextXAlignment = Enum.TextXAlignment.Left
 
 local function CloseUI()
@@ -404,7 +395,7 @@ local function CreatePage()
     Page.Visible = false
     Page.ScrollBarThickness = 5
     Page.ScrollingDirection = Enum.ScrollingDirection.Y
-    Page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    Page.AutomaticCanvasSize = Enum.AutomaticSize.Y -- ✅ بدون CanvasSize يدوي مكرر
     Page.CanvasSize = UDim2.new(0, 0, 0, 0)
     Page.BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
     Page.TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
@@ -415,10 +406,6 @@ local function CreatePage()
     Grid.HorizontalAlignment = Enum.HorizontalAlignment.Left
     Grid.VerticalAlignment = Enum.VerticalAlignment.Top
     Grid.SortOrder = Enum.SortOrder.LayoutOrder
-
-    Connect(Grid:GetPropertyChangedSignal("AbsoluteContentSize"), function()
-        Page.CanvasSize = UDim2.new(0, 0, 0, Grid.AbsoluteContentSize.Y + 10)
-    end)
 
     return Page
 end
@@ -460,70 +447,87 @@ local function CreateTab(name, page)
 end
 
 -- ─────────────────────────────────────────────────────
--- SECTION 5 · LOAD FUNCTIONS
+-- SECTION 5 · REMOTE LOADERS
 -- ─────────────────────────────────────────────────────
 
-local ALLOWED_DOMAINS = {
-    "raw.githubusercontent.com",
-    "gist.githubusercontent.com",
-    "pastebin.com",
-    "rawscripts.net",
-    "pastefy.app",
-    "hellohellohell0.com",
-    "api.luarmor.net",
-    "encrypt-x.pages.dev",
+-- ✅ فحص الدومين بالضبط (مو find) 
+local ALLOWED_HOSTS = {
+    ["raw.githubusercontent.com"] = true,
+    ["gist.githubusercontent.com"] = true,
+    ["pastebin.com"] = true,
+    ["rawscripts.net"] = true,
+    ["pastefy.app"] = true,
+    ["hellohellohell0.com"] = true,
+    ["api.luarmor.net"] = true,
+    ["encrypt-x.pages.dev"] = true,
 }
 
 local function isUrlAllowed(url)
     if type(url) ~= "string" then return false end
-    if url:sub(1,8) ~= "https://" then return false end
-    for _, d in ipairs(ALLOWED_DOMAINS) do
-        if url:find(d, 1, true) then return true end
-    end
-    return false
+    local host = url:match("^https://([^/%?#:@]+)")
+    return host ~= nil and ALLOWED_HOSTS[host:lower()] == true
 end
 
-local function Load(url)
+local function RunRemote(url, arg, label)
     if not isUrlAllowed(url) then
         ShowToast("❌ رابط غير مسموح", 2, "error")
-        warn("❌ Load() رُفض: "..tostring(url))
+        warn("❌ "..label.." رُفض: "..tostring(url))
         return
     end
     ShowToast("⏳ جاري التحميل...", 1, "info")
     task.wait()
-    SafeCall(function()
-        loadstring(game:HttpGet(url))()
+    local ok = SafeCall(function()
+        local src = game:HttpGet(url)
+        local fn, err = loadstring(src)
+        if not fn then error("loadstring: "..tostring(err), 0) end
+        fn(arg)
+    end, label..url)
+    if ok then
         ShowToast("✅ تم التحميل", 1, "success")
-    end, "Load:"..url)
-end
-
-local function LoadWithArg(url, arg)
-    if not isUrlAllowed(url) then
-        ShowToast("❌ رابط غير مسموح", 2, "error")
-        warn("❌ LoadWithArg() رُفض: "..tostring(url))
-        return
+    else
+        ShowToast("❌ فشل التحميل", 2, "error") -- ✅ ما يطلع نجاح إذا فشل
     end
-    ShowToast("⏳ جاري التحميل...", 1, "info")
-    task.wait()
-    SafeCall(function()
-        local scriptFunc = loadstring(game:HttpGet(url))
-        if scriptFunc then scriptFunc(arg) end
-        ShowToast("✅ تم التحميل", 1, "success")
-    end, "LoadWithArg:"..url)
 end
 
+local function Load(url) RunRemote(url, nil, "Load:") end
+local function LoadWithArg(url, arg) RunRemote(url, arg, "LoadWithArg:") end
+
 -- ─────────────────────────────────────────────────────
--- SECTION 6 · CHARACTER RE-BINDING
+-- SECTION 6 · CHARACTER STATE + SPEED / JUMP
 -- ─────────────────────────────────────────────────────
+
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+
+HUB.fovOn = false
+HUB.fullbright = false
+HUB.noclipOriginal = {}
+HUB.originalFOV = workspace.CurrentCamera and workspace.CurrentCamera.FieldOfView
+
+local stats = {
+    WalkSpeed = {enabled = false, value = 16, default = 16, max = 1e15, orig = "originalWS", title = "Speed", y = 0.15},
+    JumpPower = {enabled = false, value = 50, default = 50, max = 1000, orig = "originalJP", title = "Jump Power", y = 0.4},
+}
+
+local function applyStats()
+    local char = p.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    for prop, s in pairs(stats) do
+        if s.enabled then
+            if prop == "JumpPower" then hum.UseJumpPower = true end
+            hum[prop] = s.value
+        end
+    end
+end
 
 local function applyCharacterState(char)
     local h = char:WaitForChild("Humanoid", 5)
     if not h then return end
     HUB.originalWS = HUB.originalWS or h.WalkSpeed
     HUB.originalJP = HUB.originalJP or h.JumpPower
-    if HUB.state.speed then
-        h.WalkSpeed = HUB.state.speedValue or 50
-    end
+    task.wait(0.2)
+    applyStats()
 end
 
 Connect(p.CharacterAdded, applyCharacterState)
@@ -531,43 +535,24 @@ if p.Character then
     task.spawn(applyCharacterState, p.Character)
 end
 
--- ─────────────────────────────────────────────────────
--- SECTION 7 · SPEED UI (واجهة سرعة مستقلة)
--- ─────────────────────────────────────────────────────
-
-local speedEnabled = false
-local speedValue = 16
-
-local function applySpeed()
-    local char = p.Character
-    if not char then return end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum then return end
-    if speedEnabled then
-        hum.WalkSpeed = speedValue
-    end
-end
-
-Connect(p.CharacterAdded, function()
-    task.wait(0.2)
-    applySpeed()
-end)
-
-local function OpenSpeedUI()
-    local existing = p.PlayerGui:FindFirstChild(g.."_SpeedUI")
+-- واجهة موحّدة للسرعة وقوة القفز
+local function OpenStatUI(prop)
+    local s = stats[prop]
+    local guiName = g.."_"..prop.."UI"
+    local existing = PG:FindFirstChild(guiName)
     if existing then
         existing:Destroy()
         return
     end
 
-    local speedGui = NewInst("ScreenGui", p.PlayerGui)
-    speedGui.Name = g.."_SpeedUI"
-    speedGui.ResetOnSpawn = false
-    speedGui.DisplayOrder = 102
+    local ui = NewInst("ScreenGui", PG)
+    ui.Name = guiName
+    ui.ResetOnSpawn = false
+    ui.DisplayOrder = 102
 
-    local frame = NewInst("Frame", speedGui)
+    local frame = NewInst("Frame", ui)
     frame.Size = UDim2.new(0, 200, 0, 115)
-    frame.Position = UDim2.new(0.5, -100, 0.2, 0)
+    frame.Position = UDim2.new(0.5, -100, s.y, 0)
     frame.BackgroundColor3 = Color3.fromRGB(0, 120, 255)
     frame.BorderSizePixel = 0
     frame.ClipsDescendants = true
@@ -583,7 +568,7 @@ local function OpenSpeedUI()
     title.Size = UDim2.new(1, -80, 0, 22)
     title.Position = UDim2.new(0, 6, 0, 4)
     title.BackgroundTransparency = 1
-    title.Text = "Speed"
+    title.Text = s.title
     title.TextColor3 = Color3.fromRGB(0, 255, 255)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 15
@@ -606,82 +591,84 @@ local function OpenSpeedUI()
     local box = NewInst("TextBox", frame)
     box.Size = UDim2.new(1, -10, 0, 25)
     box.Position = UDim2.new(0, 5, 0, 35)
-    box.Text = tostring(speedValue)
+    box.Text = tostring(s.value)
+    box.ClearTextOnFocus = false
     NewInst("UICorner", box).CornerRadius = UDim.new(0, 4)
 
     local toggle = NewInst("TextButton", frame)
     toggle.Size = UDim2.new(1, -10, 0, 30)
     toggle.Position = UDim2.new(0, 5, 0, 70)
-    toggle.Text = speedEnabled and "ON" or "OFF"
-    toggle.BackgroundColor3 = speedEnabled and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(170, 0, 0)
+    toggle.Text = s.enabled and "ON" or "OFF"
+    toggle.BackgroundColor3 = s.enabled and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(170, 0, 0)
     NewInst("UICorner", toggle).CornerRadius = UDim.new(0, 4)
 
     local small = false
 
     Connect(box.FocusLost, function()
-        speedValue = tonumber(box.Text) or 16
-        if speedValue > 1000000000000000 then
-            speedValue = 1000000000000000
-        end
-        applySpeed()
+        local v = tonumber(box.Text)
+        if not v or v < 0 then v = s.value end
+        s.value = math.min(v, s.max)
+        box.Text = tostring(s.value)
+        applyStats()
     end)
 
     Connect(toggle.MouseButton1Click, function()
-        speedEnabled = not speedEnabled
-        if speedEnabled then
+        s.enabled = not s.enabled
+        if s.enabled then
             toggle.Text = "ON"
             toggle.BackgroundColor3 = Color3.fromRGB(0, 255, 0)
         else
             toggle.Text = "OFF"
             toggle.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
-            local char = p.Character
-            if char then
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                if hum then
-                    hum.WalkSpeed = 16
-                end
+            local hum = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+            if hum then
+                hum[prop] = HUB[s.orig] or s.default
             end
         end
-        applySpeed()
+        applyStats()
     end)
 
     Connect(min.MouseButton1Click, function()
         small = not small
-        if small then
-            box.Visible = false
-            toggle.Visible = false
-            frame.Size = UDim2.new(0, 200, 0, 30)
-        else
-            box.Visible = true
-            toggle.Visible = true
-            frame.Size = UDim2.new(0, 200, 0, 115)
-        end
+        box.Visible = not small
+        toggle.Visible = not small
+        frame.Size = small and UDim2.new(0, 200, 0, 30) or UDim2.new(0, 200, 0, 115)
     end)
 
     Connect(close.MouseButton1Click, function()
-        speedGui:Destroy()
+        ui:Destroy()
     end)
 end
 
 -- ─────────────────────────────────────────────────────
--- SECTION 8 · FEATURE TABLE (مع زر تصغير لقائمة الحفظ)
+-- SECTION 7 · SAVED PLACES MANAGER (أسماء + قائمة)
 -- ─────────────────────────────────────────────────────
 
+local MAX_SAVES = 30
+
+local function findSave(saves, name)
+    for _, e in ipairs(saves) do
+        if e.name == name then return e end
+    end
+end
+
 local function OpenSaveMenu()
-    local existing = p.PlayerGui:FindFirstChild(g.."_SaveLoad")
+    local existing = PG:FindFirstChild(g.."_SaveLoad")
     if existing then
         existing:Destroy()
         return
     end
 
-    local gui = NewInst("ScreenGui", p.PlayerGui)
+    local gui = NewInst("ScreenGui", PG)
     gui.Name = g.."_SaveLoad"
     gui.ResetOnSpawn = false
     gui.DisplayOrder = 101
 
+    local fullHeight, miniHeight = 300, 38
+
     local frame = NewInst("Frame", gui)
-    frame.Size = UDim2.new(0, 220, 0, 180)
-    frame.Position = UDim2.new(0.5, -110, 0.5, -90)
+    frame.Size = UDim2.new(0, 240, 0, fullHeight)
+    frame.Position = UDim2.new(0.5, -120, 0.5, -150)
     frame.BackgroundColor3 = Color3.fromRGB(25,25,25)
     frame.BorderSizePixel = 0
     frame.ClipsDescendants = true
@@ -702,139 +689,520 @@ local function OpenSaveMenu()
     title.Size = UDim2.new(1, -70, 1, 0)
     title.Position = UDim2.new(0, 12, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "📍 حفظ / انتقال"
+    title.Text = "📍 الأماكن المحفوظة"
     title.Font = Enum.Font.GothamBold
     title.TextColor3 = Color3.fromRGB(255,255,0)
     title.TextSize = 13
-    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.TextXAlignment = Enum.TextXAlignment.Center
 
-    local minBtn = NewInst("TextButton", titleBar)
-    minBtn.Size = UDim2.new(0, 24, 0, 24)
-    minBtn.Position = UDim2.new(1, -54, 0, 4)
-    minBtn.Text = "—"
-    minBtn.BackgroundColor3 = Color3.fromRGB(60,60,60)
-    minBtn.TextColor3 = Color3.fromRGB(255,255,255)
-    minBtn.Font = Enum.Font.GothamBold
-    minBtn.TextSize = 14
-    NewInst("UICorner", minBtn).CornerRadius = UDim.new(0, 4)
+    local function headBtn(txt, x, color)
+        local b = NewInst("TextButton", titleBar)
+        b.Size = UDim2.new(0, 24, 0, 24)
+        b.Position = UDim2.new(1, x, 0, 4)
+        b.Text = txt
+        b.BackgroundColor3 = Color3.fromRGB(60,60,60)
+        b.TextColor3 = color
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 14
+        NewInst("UICorner", b).CornerRadius = UDim.new(0, 4)
+        return b
+    end
+    local minBtn = headBtn("—", -54, Color3.fromRGB(255,255,255))
+    local closeBtn = headBtn("✕", -27, Color3.fromRGB(255,80,80))
 
-    local closeBtn = NewInst("TextButton", titleBar)
-    closeBtn.Size = UDim2.new(0, 24, 0, 24)
-    closeBtn.Position = UDim2.new(1, -27, 0, 4)
-    closeBtn.Text = "✕"
-    closeBtn.BackgroundColor3 = Color3.fromRGB(60,60,60)
-    closeBtn.TextColor3 = Color3.fromRGB(255,80,80)
-    closeBtn.Font = Enum.Font.GothamBold
-    closeBtn.TextSize = 14
-    NewInst("UICorner", closeBtn).CornerRadius = UDim.new(0, 4)
+    local body = NewInst("Frame", frame)
+    body.Size = UDim2.new(1, 0, 1, -38)
+    body.Position = UDim2.new(0, 0, 0, 38)
+    body.BackgroundTransparency = 1
+    body.ClipsDescendants = true
 
-    local buttonsContainer = NewInst("Frame", frame)
-    buttonsContainer.Size = UDim2.new(1, 0, 1, -38)
-    buttonsContainer.Position = UDim2.new(0, 0, 0, 38)
-    buttonsContainer.BackgroundTransparency = 1
-    buttonsContainer.ClipsDescendants = true
+    local nameBox = NewInst("TextBox", body)
+    nameBox.Size = UDim2.new(1, -96, 0, 30)
+    nameBox.Position = UDim2.new(0, 8, 0, 2)
+    nameBox.BackgroundColor3 = Color3.fromRGB(45,45,45)
+    nameBox.PlaceholderText = "اسم المكان"
+    nameBox.PlaceholderColor3 = Color3.fromRGB(140,140,140)
+    nameBox.Text = ""
+    nameBox.TextColor3 = Color3.fromRGB(255,255,255)
+    nameBox.Font = Enum.Font.GothamMedium
+    nameBox.TextSize = 12
+    nameBox.ClearTextOnFocus = false
+    NewInst("UICorner", nameBox).CornerRadius = UDim.new(0, 7)
 
-    local saveBtn1 = NewInst("TextButton", buttonsContainer)
-    saveBtn1.Size = UDim2.new(0.88, 0, 0, 32)
-    saveBtn1.Position = UDim2.new(0.06, 0, 0, 4)
-    saveBtn1.BackgroundColor3 = Color3.fromRGB(45,45,45)
-    saveBtn1.Text = "💾 حفظ 1"
-    saveBtn1.Font = Enum.Font.GothamBold
-    saveBtn1.TextColor3 = Color3.fromRGB(255,255,255)
-    saveBtn1.TextSize = 13
-    NewInst("UICorner", saveBtn1).CornerRadius = UDim.new(0, 7)
+    local addBtn = NewInst("TextButton", body)
+    addBtn.Size = UDim2.new(0, 78, 0, 30)
+    addBtn.Position = UDim2.new(1, -86, 0, 2)
+    addBtn.BackgroundColor3 = Color3.fromRGB(255,255,0)
+    addBtn.Text = "💾 حفظ هنا"
+    addBtn.TextColor3 = Color3.fromRGB(0,0,0)
+    addBtn.Font = Enum.Font.GothamBold
+    addBtn.TextSize = 12
+    NewInst("UICorner", addBtn).CornerRadius = UDim.new(0, 7)
 
-    local loadBtn1 = NewInst("TextButton", buttonsContainer)
-    loadBtn1.Size = UDim2.new(0.88, 0, 0, 32)
-    loadBtn1.Position = UDim2.new(0.06, 0, 0, 40)
-    loadBtn1.BackgroundColor3 = Color3.fromRGB(45,45,45)
-    loadBtn1.Text = "🚀 انتقال 1"
-    loadBtn1.Font = Enum.Font.GothamBold
-    loadBtn1.TextColor3 = Color3.fromRGB(255,255,255)
-    loadBtn1.TextSize = 13
-    NewInst("UICorner", loadBtn1).CornerRadius = UDim.new(0, 7)
+    local list = NewInst("ScrollingFrame", body)
+    list.Size = UDim2.new(1, -12, 1, -42)
+    list.Position = UDim2.new(0, 6, 0, 38)
+    list.BackgroundTransparency = 1
+    list.BorderSizePixel = 0
+    list.ScrollBarThickness = 3
+    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    list.CanvasSize = UDim2.new(0, 0, 0, 0)
+    NewInst("UIListLayout", list).Padding = UDim.new(0, 4)
 
-    local saveBtn2 = NewInst("TextButton", buttonsContainer)
-    saveBtn2.Size = UDim2.new(0.88, 0, 0, 32)
-    saveBtn2.Position = UDim2.new(0.06, 0, 0, 76)
-    saveBtn2.BackgroundColor3 = Color3.fromRGB(45,45,45)
-    saveBtn2.Text = "💾 حفظ 2"
-    saveBtn2.Font = Enum.Font.GothamBold
-    saveBtn2.TextColor3 = Color3.fromRGB(255,255,255)
-    saveBtn2.TextSize = 13
-    NewInst("UICorner", saveBtn2).CornerRadius = UDim.new(0, 7)
+    local refresh
+    refresh = function()
+        for _, c in ipairs(list:GetChildren()) do
+            if not c:IsA("UIListLayout") then c:Destroy() end
+        end
+        local saves = placeList()
+        if #saves == 0 then
+            local empty = NewInst("TextLabel", list)
+            empty.Size = UDim2.new(1, 0, 0, 40)
+            empty.BackgroundTransparency = 1
+            empty.Text = "ما في أماكن محفوظة بهذي اللعبة"
+            empty.TextColor3 = Color3.fromRGB(150,150,150)
+            empty.Font = Enum.Font.Gotham
+            empty.TextSize = 12
+            empty.TextWrapped = true
+            return
+        end
+        for i, entry in ipairs(saves) do
+            local row = NewInst("Frame", list)
+            row.Size = UDim2.new(1, -6, 0, 32)
+            row.BackgroundTransparency = 1
+            row.LayoutOrder = i
 
-    local loadBtn2 = NewInst("TextButton", buttonsContainer)
-    loadBtn2.Size = UDim2.new(0.88, 0, 0, 32)
-    loadBtn2.Position = UDim2.new(0.06, 0, 0, 112)
-    loadBtn2.BackgroundColor3 = Color3.fromRGB(45,45,45)
-    loadBtn2.Text = "🚀 انتقال 2"
-    loadBtn2.Font = Enum.Font.GothamBold
-    loadBtn2.TextColor3 = Color3.fromRGB(255,255,255)
-    loadBtn2.TextSize = 13
-    NewInst("UICorner", loadBtn2).CornerRadius = UDim.new(0, 7)
+            local go = NewInst("TextButton", row)
+            go.Size = UDim2.new(1, -36, 1, 0)
+            go.BackgroundColor3 = Color3.fromRGB(45,45,45)
+            go.Text = "🚀 "..entry.name
+            go.TextColor3 = Color3.fromRGB(255,255,255)
+            go.Font = Enum.Font.GothamBold
+            go.TextSize = 12
+            go.TextTruncate = Enum.TextTruncate.AtEnd
+            NewInst("UICorner", go).CornerRadius = UDim.new(0, 7)
 
-    local isMinimized = false
-    local fullHeight = 180
-    local miniHeight = 38
+            local del = NewInst("TextButton", row)
+            del.Size = UDim2.new(0, 30, 1, 0)
+            del.Position = UDim2.new(1, -30, 0, 0)
+            del.BackgroundColor3 = Color3.fromRGB(70,35,35)
+            del.Text = "🗑"
+            del.TextSize = 14
+            NewInst("UICorner", del).CornerRadius = UDim.new(0, 7)
 
-    local function toggleMinimize()
-        isMinimized = not isMinimized
-        if isMinimized then
-            buttonsContainer.Visible = false
-            frame.Size = UDim2.new(0, 220, 0, miniHeight)
-            minBtn.Text = "□"
-            title.Text = "📍 حفظ / انتقال (مصغّر)"
-        else
-            buttonsContainer.Visible = true
-            frame.Size = UDim2.new(0, 220, 0, fullHeight)
-            minBtn.Text = "—"
-            title.Text = "📍 حفظ / انتقال"
+            go.MouseButton1Click:Connect(function()
+                GetHRP().CFrame = entry.cf
+                ShowToast("✅ انتقلت إلى "..entry.name, 1, "success")
+            end)
+            del.MouseButton1Click:Connect(function()
+                for j, e in ipairs(saves) do
+                    if e == entry then
+                        table.remove(saves, j)
+                        break
+                    end
+                end
+                ShowToast("🗑 تم حذف "..entry.name, 1, "warn")
+                refresh()
+            end)
         end
     end
 
-    Connect(minBtn.MouseButton1Click, toggleMinimize)
+    addBtn.MouseButton1Click:Connect(function()
+        local saves = placeList()
+        local name = nameBox.Text:match("^%s*(.-)%s*$")
+        if name == "" then
+            local n = #saves + 1
+            while findSave(saves, "مكان "..n) do n += 1 end
+            name = "مكان "..n
+        end
+        local len = utf8.len(name)
+        if len and len > 20 then
+            name = name:sub(1, utf8.offset(name, 21) - 1)
+        end
+
+        local hrp = GetHRP()
+        local old = findSave(saves, name)
+        if old then
+            old.cf = hrp.CFrame
+            nameBox.Text = ""
+            ShowToast("✅ تم تحديث "..name, 1, "success")
+            return
+        end
+        if #saves >= MAX_SAVES then
+            ShowToast("⚠️ وصلت الحد الأقصى ("..MAX_SAVES..")", 1.5, "warn")
+            return
+        end
+        table.insert(saves, {name = name, cf = hrp.CFrame})
+        nameBox.Text = ""
+        ShowToast("✅ تم حفظ "..name, 1, "success")
+        refresh()
+    end)
+
+    local isMinimized = false
+    Connect(minBtn.MouseButton1Click, function()
+        isMinimized = not isMinimized
+        body.Visible = not isMinimized
+        frame.Size = UDim2.new(0, 240, 0, isMinimized and miniHeight or fullHeight)
+        minBtn.Text = isMinimized and "□" or "—"
+        title.Text = isMinimized and "📍 الأماكن (مصغّر)" or "📍 الأماكن المحفوظة"
+    end)
     Connect(closeBtn.MouseButton1Click, function()
         gui:Destroy()
     end)
 
-    Connect(saveBtn1.MouseButton1Click, function()
-        saveBtn1.BackgroundColor3 = Color3.fromRGB(255,255,0)
-        saveBtn1.TextColor3 = Color3.fromRGB(0,0,0)
-        task.wait(0.08)
-        saveBtn1.BackgroundColor3 = Color3.fromRGB(45,45,45)
-        saveBtn1.TextColor3 = Color3.fromRGB(255,255,255)
-        SavePos1()
+    refresh()
+end
+
+-- ─────────────────────────────────────────────────────
+-- SECTION 7.5 · NOCLIP / CLICK TP / SERVER / VISUAL
+-- ─────────────────────────────────────────────────────
+
+-- NoClip: نخزّن بس الأجزاء اللي كانت تصادم فعلاً ونرجّعها عند الإطفاء
+local function restoreNoclip()
+    for part in pairs(HUB.noclipOriginal) do
+        if part.Parent then part.CanCollide = true end
+    end
+    HUB.noclipOriginal = {}
+end
+HUB.restoreNoclip = restoreNoclip
+
+local function SetNoClip(on)
+    if on then
+        if HUB.noclipConn then return end
+        HUB.noclipConn = Connect(RS.Stepped, function()
+            local char = p.Character
+            if not char then return end
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") and part.CanCollide then
+                    HUB.noclipOriginal[part] = true
+                    part.CanCollide = false
+                end
+            end
+        end)
+    else
+        if HUB.noclipConn then
+            pcall(function() HUB.noclipConn:Disconnect() end)
+            HUB.noclipConn = nil
+        end
+        restoreNoclip()
+    end
+end
+
+-- Click TP: نقرة (أو لمسة) قصيرة على العالم تنقلك لمكانها
+local function isPointer(input)
+    return input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch
+end
+
+local function SetClickTP(on)
+    if HUB.ctpConns then
+        for _, c in ipairs(HUB.ctpConns) do pcall(function() c:Disconnect() end) end
+        HUB.ctpConns = nil
+    end
+    if not on then return end
+
+    local startPos
+    HUB.ctpConns = {
+        Connect(U.InputBegan, function(input, gpe)
+            if gpe or not isPointer(input) then return end
+            startPos = input.Position
+        end),
+        Connect(U.InputEnded, function(input)
+            if not startPos or not isPointer(input) then return end
+            local moved = (input.Position - startPos).Magnitude
+            startPos = nil
+            if moved > 10 then return end -- سحب كاميرا مو نقرة
+
+            local cam = workspace.CurrentCamera
+            local char = p.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if not (cam and hrp) then return end
+
+            local ray = cam:ScreenPointToRay(input.Position.X, input.Position.Y)
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = {char}
+            local hit = workspace:Raycast(ray.Origin, ray.Direction * 2000, params)
+            if hit then
+                local rot = hrp.CFrame - hrp.CFrame.Position
+                hrp.CFrame = CFrame.new(hit.Position + Vector3.new(0, 3, 0)) * rot
+            end
+        end),
+    }
+end
+
+-- Rejoin / Server Hop
+Connect(TeleportService.TeleportInitFailed, function(plr, _, msg)
+    if plr == p then
+        ShowToast("❌ فشل الانتقال: "..tostring(msg), 3, "error")
+    end
+end)
+
+local function Rejoin()
+    ShowToast("⏳ جاري إعادة الدخول...", 2, "info")
+    local ok, err = pcall(function()
+        if #Players:GetPlayers() <= 1 then
+            TeleportService:Teleport(game.PlaceId, p)
+        else
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, p)
+        end
+    end)
+    if not ok then
+        ShowToast("❌ فشلت إعادة الدخول", 2, "error")
+        warn(err)
+    end
+end
+
+local function ServerHop()
+    ShowToast("⏳ جاري البحث عن سيرفر...", 2, "info")
+    task.spawn(function()
+        local ok, result = pcall(function()
+            local url = "https://games.roblox.com/v1/games/"..tostring(game.PlaceId)
+                .."/servers/Public?sortOrder=Asc&limit=100"
+            return HttpService:JSONDecode(game:HttpGet(url))
+        end)
+        if not ok or type(result) ~= "table" or type(result.data) ~= "table" then
+            ShowToast("❌ فشل جلب السيرفرات", 2, "error")
+            return
+        end
+
+        local candidates = {}
+        for _, sv in ipairs(result.data) do
+            if sv.id ~= game.JobId and sv.playing and sv.maxPlayers
+                and sv.playing < sv.maxPlayers - 1 then
+                table.insert(candidates, sv.id)
+            end
+        end
+        if #candidates == 0 then
+            ShowToast("❌ ما لقيت سيرفر مناسب", 2, "error")
+            return
+        end
+
+        ShowToast("🚀 انتقال لسيرفر جديد...", 2, "info")
+        local pick = candidates[math.random(#candidates)]
+        local ok2, err = pcall(function()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, pick, p)
+        end)
+        if not ok2 then
+            ShowToast("❌ فشل الانتقال", 2, "error")
+            warn(err)
+        end
+    end)
+end
+
+-- FOV + Fullbright
+local function applyFullbright()
+    local LT = game.Lighting
+    LT.Brightness = 2
+    LT.ClockTime = 14
+    LT.FogEnd = 1e9
+    LT.GlobalShadows = false
+    LT.Ambient = Color3.fromRGB(178,178,178)
+    LT.OutdoorAmbient = Color3.fromRGB(178,178,178)
+end
+
+local function restoreLighting()
+    for k, v in pairs(HUB.lighting) do
+        game.Lighting[k] = v
+    end
+end
+
+-- يثبّت FOV والإضاءة لو اللعبة حاولت تغيّرها
+Connect(RS.RenderStepped, function()
+    if HUB.fovOn then
+        local cam = workspace.CurrentCamera
+        if cam and cam.FieldOfView ~= HUB.fov then
+            cam.FieldOfView = HUB.fov
+        end
+    end
+    if HUB.fullbright then
+        applyFullbright()
+    end
+end)
+
+local function OpenVisualUI()
+    local guiName = g.."_VisualUI"
+    local existing = PG:FindFirstChild(guiName)
+    if existing then
+        existing:Destroy()
+        return
+    end
+
+    local ui = NewInst("ScreenGui", PG)
+    ui.Name = guiName
+    ui.ResetOnSpawn = false
+    ui.DisplayOrder = 103
+
+    local frame = NewInst("Frame", ui)
+    frame.Size = UDim2.new(0, 230, 0, 130)
+    frame.Position = UDim2.new(0.5, -115, 0.3, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(25,25,25)
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    NewInst("UICorner", frame).CornerRadius = UDim.new(0, 10)
+    local stroke = NewInst("UIStroke", frame)
+    stroke.Color = Color3.fromRGB(255,255,0)
+    stroke.Thickness = 1.2
+    stroke.Transparency = 0.2
+    MakeDraggable(frame)
+
+    local title = NewInst("TextLabel", frame)
+    title.Size = UDim2.new(1, -40, 0, 30)
+    title.Position = UDim2.new(0, 10, 0, 2)
+    title.BackgroundTransparency = 1
+    title.Text = "🔆 FOV / إضاءة"
+    title.Font = Enum.Font.GothamBold
+    title.TextColor3 = Color3.fromRGB(255,255,0)
+    title.TextSize = 13
+
+    local close = NewInst("TextButton", frame)
+    close.Size = UDim2.new(0, 24, 0, 24)
+    close.Position = UDim2.new(1, -30, 0, 5)
+    close.Text = "✕"
+    close.BackgroundColor3 = Color3.fromRGB(60,60,60)
+    close.TextColor3 = Color3.fromRGB(255,80,80)
+    close.Font = Enum.Font.GothamBold
+    close.TextSize = 14
+    NewInst("UICorner", close).CornerRadius = UDim.new(0, 4)
+    Connect(close.MouseButton1Click, function() ui:Destroy() end)
+
+    local fovLabel = NewInst("TextLabel", frame)
+    fovLabel.Size = UDim2.new(1, -20, 0, 18)
+    fovLabel.Position = UDim2.new(0, 10, 0, 34)
+    fovLabel.BackgroundTransparency = 1
+    fovLabel.TextColor3 = Color3.fromRGB(255,255,255)
+    fovLabel.Font = Enum.Font.GothamMedium
+    fovLabel.TextSize = 12
+    fovLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+    -- زر شفاف أكبر من الشريط عشان اللمس يكون سهل ولا يسحب النافذة
+    local slider = NewInst("TextButton", frame)
+    slider.Size = UDim2.new(1, -20, 0, 24)
+    slider.Position = UDim2.new(0, 10, 0, 56)
+    slider.BackgroundTransparency = 1
+    slider.AutoButtonColor = false
+    slider.Text = ""
+
+    local bar = NewInst("Frame", slider)
+    bar.Size = UDim2.new(1, 0, 0, 6)
+    bar.Position = UDim2.new(0, 0, 0.5, -3)
+    bar.BackgroundColor3 = Color3.fromRGB(60,60,60)
+    bar.BorderSizePixel = 0
+    NewInst("UICorner", bar).CornerRadius = UDim.new(0, 3)
+
+    local fill = NewInst("Frame", bar)
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(255,255,0)
+    fill.BorderSizePixel = 0
+    NewInst("UICorner", fill).CornerRadius = UDim.new(0, 3)
+
+    local knob = NewInst("Frame", bar)
+    knob.Size = UDim2.new(0, 14, 0, 14)
+    knob.AnchorPoint = Vector2.new(0.5, 0.5)
+    knob.Position = UDim2.new(0, 0, 0.5, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    NewInst("UICorner", knob).CornerRadius = UDim.new(0, 7)
+
+    local FOV_MIN, FOV_MAX = 30, 120
+    local function showFov(v)
+        local f = math.clamp((v - FOV_MIN) / (FOV_MAX - FOV_MIN), 0, 1)
+        fill.Size = UDim2.new(f, 0, 1, 0)
+        knob.Position = UDim2.new(f, 0, 0.5, 0)
+        fovLabel.Text = "FOV: "..v
+    end
+
+    local cam = workspace.CurrentCamera
+    showFov(HUB.fovOn and HUB.fov or math.floor((cam and cam.FieldOfView or 70) + 0.5))
+
+    local function setFromX(x)
+        local f = math.clamp((x - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
+        local v = math.floor(FOV_MIN + f * (FOV_MAX - FOV_MIN) + 0.5)
+        HUB.fov = v
+        HUB.fovOn = true
+        local c = workspace.CurrentCamera
+        if c then c.FieldOfView = v end
+        showFov(v)
+    end
+
+    local sliding = false
+    local sliderConns = {
+        slider.InputBegan:Connect(function(i)
+            if isPointer(i) then
+                sliding = true
+                setFromX(i.Position.X)
+            end
+        end),
+        U.InputChanged:Connect(function(i)
+            if sliding and (i.UserInputType == Enum.UserInputType.MouseMovement
+                or i.UserInputType == Enum.UserInputType.Touch) then
+                setFromX(i.Position.X)
+            end
+        end),
+        U.InputEnded:Connect(function(i)
+            if isPointer(i) then sliding = false end
+        end),
+    }
+    ui.Destroying:Connect(function()
+        for _, c in ipairs(sliderConns) do pcall(function() c:Disconnect() end) end
     end)
 
-    Connect(loadBtn1.MouseButton1Click, function()
-        loadBtn1.BackgroundColor3 = Color3.fromRGB(255,255,0)
-        loadBtn1.TextColor3 = Color3.fromRGB(0,0,0)
-        task.wait(0.08)
-        loadBtn1.BackgroundColor3 = Color3.fromRGB(45,45,45)
-        loadBtn1.TextColor3 = Color3.fromRGB(255,255,255)
-        LoadPos1()
+    local resetBtn = NewInst("TextButton", frame)
+    resetBtn.Size = UDim2.new(0.5, -15, 0, 28)
+    resetBtn.Position = UDim2.new(0, 10, 0, 92)
+    resetBtn.BackgroundColor3 = Color3.fromRGB(60,60,60)
+    resetBtn.Text = "↺ إعادة FOV"
+    resetBtn.TextColor3 = Color3.fromRGB(255,255,255)
+    resetBtn.Font = Enum.Font.GothamBold
+    resetBtn.TextSize = 11
+    NewInst("UICorner", resetBtn).CornerRadius = UDim.new(0, 7)
+
+    local fbBtn = NewInst("TextButton", frame)
+    fbBtn.Size = UDim2.new(0.5, -15, 0, 28)
+    fbBtn.Position = UDim2.new(0.5, 5, 0, 92)
+    fbBtn.Text = ""
+    fbBtn.TextColor3 = Color3.fromRGB(255,255,255)
+    fbBtn.Font = Enum.Font.GothamBold
+    fbBtn.TextSize = 11
+    NewInst("UICorner", fbBtn).CornerRadius = UDim.new(0, 7)
+
+    local function showFb()
+        fbBtn.Text = HUB.fullbright and "Fullbright: ON" or "Fullbright: OFF"
+        fbBtn.BackgroundColor3 = HUB.fullbright and Color3.fromRGB(0,150,0) or Color3.fromRGB(60,60,60)
+    end
+    showFb()
+
+    Connect(resetBtn.MouseButton1Click, function()
+        HUB.fovOn = false
+        local c = workspace.CurrentCamera
+        if c and HUB.originalFOV then
+            c.FieldOfView = HUB.originalFOV
+            showFov(math.floor(HUB.originalFOV + 0.5))
+        end
     end)
 
-    Connect(saveBtn2.MouseButton1Click, function()
-        saveBtn2.BackgroundColor3 = Color3.fromRGB(255,255,0)
-        saveBtn2.TextColor3 = Color3.fromRGB(0,0,0)
-        task.wait(0.08)
-        saveBtn2.BackgroundColor3 = Color3.fromRGB(45,45,45)
-        saveBtn2.TextColor3 = Color3.fromRGB(255,255,255)
-        SavePos2()
+    Connect(fbBtn.MouseButton1Click, function()
+        HUB.fullbright = not HUB.fullbright
+        if HUB.fullbright then
+            applyFullbright()
+        else
+            restoreLighting()
+        end
+        showFb()
     end)
+end
 
-    Connect(loadBtn2.MouseButton1Click, function()
-        loadBtn2.BackgroundColor3 = Color3.fromRGB(255,255,0)
-        loadBtn2.TextColor3 = Color3.fromRGB(0,0,0)
-        task.wait(0.08)
-        loadBtn2.BackgroundColor3 = Color3.fromRGB(45,45,45)
-        loadBtn2.TextColor3 = Color3.fromRGB(255,255,255)
-        LoadPos2()
-    end)
+-- ─────────────────────────────────────────────────────
+-- SECTION 8 · FEATURES
+-- ─────────────────────────────────────────────────────
 
-    frame.BackgroundTransparency = 0
+local function Remote(name, url)
+    return {Name = name, Function = function() Load(url) end}
+end
+
+local function inCharacter(v)
+    local m = v:FindFirstAncestorOfClass("Model")
+    return m ~= nil and m:FindFirstChildOfClass("Humanoid") ~= nil
 end
 
 local CF = {
@@ -850,9 +1218,7 @@ local CF = {
             ShowToast("✅ قفز لانهائي مفعّل", 0.8)
         else
             if HUB.infJumpConn then
-                pcall(function()
-                    HUB.infJumpConn:Disconnect()
-                end)
+                pcall(function() HUB.infJumpConn:Disconnect() end)
                 HUB.infJumpConn = nil
             end
             ShowToast("❌ قفز لانهائي متوقف", 0.8, "warn")
@@ -860,31 +1226,44 @@ local CF = {
     end},
 
     {Name="سرعة", Function=function()
-        OpenSpeedUI()
+        OpenStatUI("WalkSpeed")
+    end},
+
+    {Name="قوة القفز", Function=function()
+        OpenStatUI("JumpPower")
+    end},
+
+    {Name="NoClip", Toggle=true, Function=function()
+        HUB.state.noclip = not HUB.state.noclip
+        SetNoClip(HUB.state.noclip)
+        if HUB.state.noclip then
+            ShowToast("✅ NoClip مفعّل", 0.8, "success")
+        else
+            ShowToast("❌ NoClip متوقف", 0.8, "warn")
+        end
+    end},
+
+    {Name="نقر انتقال", Toggle=true, Function=function()
+        HUB.state.clickTP = not HUB.state.clickTP
+        SetClickTP(HUB.state.clickTP)
+        if HUB.state.clickTP then
+            ShowToast("✅ اضغط على أي مكان للانتقال", 1.2, "success")
+        else
+            ShowToast("❌ نقر انتقال متوقف", 0.8, "warn")
+        end
     end},
 
     {Name="ESP", Toggle=true, Function=function()
         HUB.state.esp = not HUB.state.esp
+
         local function cleanupESP()
             for _, c in ipairs(HUB.espConns) do
-                pcall(function()
-                    c:Disconnect()
-                end)
+                pcall(function() c:Disconnect() end)
             end
             HUB.espConns = {}
-            for plr, d in pairs(HUB.espData) do
-                pcall(function()
-                    if d.highlight then d.highlight:Destroy() end
-                end)
-                pcall(function()
-                    if d.billboard then d.billboard:Destroy() end
-                end)
-                HUB.espData[plr] = nil
-            end
+            destroyESPObjects()
             if HUB.espGui then
-                pcall(function()
-                    HUB.espGui:Destroy()
-                end)
+                pcall(function() HUB.espGui:Destroy() end)
                 HUB.espGui = nil
             end
         end
@@ -897,7 +1276,7 @@ local CF = {
 
         cleanupESP()
 
-        local ESP = NewInst("ScreenGui", p.PlayerGui)
+        local ESP = NewInst("ScreenGui", PG)
         ESP.Name = "ESPGui"
         ESP.ResetOnSpawn = false
         HUB.espGui = ESP
@@ -909,7 +1288,7 @@ local CF = {
         TBB.BackgroundColor3 = Color3.fromRGB(30,30,30)
         TBB.TextColor3 = Color3.fromRGB(255,255,0)
         NewInst("UICorner", TBB).CornerRadius = UDim.new(0,10)
-        MakeDraggable(TBB)
+        local tbbDragged = MakeDraggable(TBB)
 
         local enabled = true
 
@@ -925,26 +1304,27 @@ local CF = {
             local head = char:WaitForChild("Head", 5)
             if not head then return end
 
-            if HUB.espData[plr] then
-                pcall(function()
-                    if HUB.espData[plr].highlight then HUB.espData[plr].highlight:Destroy() end
-                    if HUB.espData[plr].billboard then HUB.espData[plr].billboard:Destroy() end
-                end)
+            local old = HUB.espData[plr]
+            if old then
+                pcall(function() if old.highlight then old.highlight:Destroy() end end)
+                pcall(function() if old.billboard then old.billboard:Destroy() end end)
             end
 
-            local hl = Instance.new("Highlight", char)
+            local hl = Instance.new("Highlight")
             hl.FillColor = teamColor(plr)
             hl.OutlineColor = Color3.new(1,1,1)
             hl.Enabled = enabled
+            hl.Parent = char
 
-            local bg = Instance.new("BillboardGui", head)
+            local bg = Instance.new("BillboardGui")
             bg.Size = UDim2.new(0, 80, 0, 18)
             bg.StudsOffset = Vector3.new(0, 2.5, 0)
             bg.AlwaysOnTop = true
             bg.Enabled = enabled
             bg.MaxDistance = 200
+            bg.Parent = head
 
-            local tl = Instance.new("TextLabel", bg)
+            local tl = Instance.new("TextLabel")
             tl.Size = UDim2.new(1, 0, 1, 0)
             tl.BackgroundTransparency = 1
             tl.Text = plr.Name
@@ -952,6 +1332,7 @@ local CF = {
             tl.Font = Enum.Font.GothamBold
             tl.TextSize = 11
             tl.TextStrokeTransparency = 0.4
+            tl.Parent = bg
 
             HUB.espData[plr] = {highlight = hl, billboard = bg, label = tl}
         end
@@ -959,14 +1340,25 @@ local CF = {
         local function createESP(plr)
             if plr == p then return end
             if plr.Character then
-                applyESP(plr, plr.Character)
+                task.spawn(applyESP, plr, plr.Character)
             end
             table.insert(HUB.espConns, plr.CharacterAdded:Connect(function(c)
                 applyESP(plr, c)
             end))
+            -- ✅ تحديث اللون إذا تغيّر الفريق
+            table.insert(HUB.espConns, plr:GetPropertyChangedSignal("Team"):Connect(function()
+                local d = HUB.espData[plr]
+                if d then
+                    pcall(function()
+                        d.highlight.FillColor = teamColor(plr)
+                        d.label.TextColor3 = teamColor(plr)
+                    end)
+                end
+            end))
         end
 
         table.insert(HUB.espConns, TBB.MouseButton1Click:Connect(function()
+            if tbbDragged() then return end
             enabled = not enabled
             TBB.Text = enabled and "👁️✅" or "👁️❌"
             for _, d in pairs(HUB.espData) do
@@ -978,68 +1370,58 @@ local CF = {
             ShowToast(enabled and "✅ ESP مفعّل" or "❌ ESP متوقف", 0.8)
         end))
 
-        table.insert(HUB.espConns, game.Players.PlayerAdded:Connect(createESP))
-        table.insert(HUB.espConns, game.Players.PlayerRemoving:Connect(function(plr)
-            if HUB.espData[plr] then
-                pcall(function()
-                    HUB.espData[plr].highlight:Destroy()
-                end)
-                pcall(function()
-                    HUB.espData[plr].billboard:Destroy()
-                end)
+        table.insert(HUB.espConns, Players.PlayerAdded:Connect(createESP))
+        table.insert(HUB.espConns, Players.PlayerRemoving:Connect(function(plr)
+            local d = HUB.espData[plr]
+            if d then
+                pcall(function() d.highlight:Destroy() end)
+                pcall(function() d.billboard:Destroy() end)
                 HUB.espData[plr] = nil
             end
         end))
 
-        for _, plr in pairs(game.Players:GetPlayers()) do
+        for _, plr in ipairs(Players:GetPlayers()) do
             createESP(plr)
         end
 
         ShowToast("✅ ESP مفعّل", 0.8)
     end},
 
-    {Name="طيران", Function=function()
-        Load("https://raw.githubusercontent.com/XNEOFF/FlyGuiV3/main/FlyGuiV3.txt")
-    end},
-
-    {Name="طيران سيارة 🚗", Function=function()
-        Load("https://raw.githubusercontent.com/Sumpre/Scripts/refs/heads/main/vfly.lua")
-    end},
-
-    {Name="المشي في الهواء", Function=function()
-        Load("https://raw.githubusercontent.com/GhostPlayer352/Test4/main/Float")
-    end},
-
-    {Name="قفل الشاشة", Function=function()
-        Load("https://raw.githubusercontent.com/MiniNoobie/ShiftLockx/main/Shiftlock-MiniNoobie")
-    end},
+    Remote("طيران", "https://raw.githubusercontent.com/XNEOFF/FlyGuiV3/main/FlyGuiV3.txt"),
+    Remote("طيران سيارة 🚗", "https://raw.githubusercontent.com/Sumpre/Scripts/refs/heads/main/vfly.lua"),
+    Remote("المشي في الهواء", "https://raw.githubusercontent.com/GhostPlayer352/Test4/main/Float"),
+    Remote("قفل الشاشة", "https://raw.githubusercontent.com/MiniNoobie/ShiftLockx/main/Shiftlock-MiniNoobie"),
 
     {Name="قائمة السيرفرات 🖥️", Function=function()
         LoadWithArg("https://encrypt-x.pages.dev/Scripts?Id=9434850125280", "9434850125280")
     end},
 
     {Name="مراقبة شخص", Function=function()
-        if p.PlayerGui:FindFirstChild("SpectateGui") then
-            p.PlayerGui.SpectateGui:Destroy()
+        local old = PG:FindFirstChild("SpectateGui")
+        if old then
+            old:Destroy()
             return
         end
 
-        local gui = NewInst("ScreenGui", p.PlayerGui)
+        local cam = workspace.CurrentCamera
+        local function resetCam()
+            local h = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+            if h and cam then cam.CameraSubject = h end
+        end
+
+        local gui = NewInst("ScreenGui", PG)
         gui.Name = "SpectateGui"
         gui.ResetOnSpawn = false
-        -- تأكد من تتبع هذه الواجهة للتنظيف
-        table.insert(HUB.instances, gui)
+        gui.Destroying:Connect(resetCam) -- ✅ ترجع الكاميرا عند الإغلاق
 
-        -- ✅ جعل زر المراقبة قابلاً للسحب
+        -- ✅ سحب واحد بس (شلت btn.Draggable)
         local btn = NewInst("ImageButton", gui)
         btn.Size = UDim2.new(0,50,0,50)
         btn.Position = UDim2.new(0,10,0.5,-25)
         btn.Image = "rbxassetid://176106970"
         btn.BackgroundTransparency = 0.3
-        btn.Active = true
-        btn.Draggable = true
         NewInst("UICorner", btn).CornerRadius = UDim.new(0,25)
-        MakeDraggable(btn)  -- ✅ جعل الزر قابل للسحب
+        local btnDragged = MakeDraggable(btn)
 
         local bar = NewInst("Frame", gui)
         bar.Position = UDim2.new(0.5,-100,1,10)
@@ -1047,7 +1429,6 @@ local CF = {
         bar.BackgroundColor3 = Color3.new(0,0,0)
         bar.BackgroundTransparency = 0.2
         NewInst("UICorner", bar).CornerRadius = UDim.new(0,8)
-        -- ✅ جعل شريط التحكم قابلاً للسحب أيضاً
         MakeDraggable(bar)
 
         local prev = NewInst("TextButton", bar)
@@ -1076,171 +1457,94 @@ local CF = {
         title.Font = Enum.Font.Gotham
         title.TextScaled = true
 
-        local cam = workspace.CurrentCamera
         local spectating = false
         local index = 1
-        local players = game.Players:GetPlayers()
+        local plist = Players:GetPlayers()
 
         local function update()
-            players = game.Players:GetPlayers()
-            if #players == 0 then return end
-            index = math.clamp(index, 1, #players)
-            local plr = players[index]
-            if plr and plr.Character and plr.Character:FindFirstChild("Humanoid") then
-                cam.CameraSubject = plr.Character.Humanoid
+            plist = Players:GetPlayers()
+            if #plist == 0 then return end
+            index = math.clamp(index, 1, #plist)
+            local plr = plist[index]
+            local hum = plr and plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum then
+                cam.CameraSubject = hum
                 title.Text = plr.Name
             end
         end
 
         Connect(btn.MouseButton1Click, function()
+            if btnDragged() then return end
             spectating = not spectating
             if spectating then
                 bar:TweenPosition(UDim2.new(0.5,-100,0.85,0), "Out", "Quad", 0.3, true)
                 update()
             else
                 bar:TweenPosition(UDim2.new(0.5,-100,1,10), "Out", "Quad", 0.3, true)
-                if p.Character and p.Character:FindFirstChild("Humanoid") then
-                    cam.CameraSubject = p.Character.Humanoid
-                end
+                resetCam()
             end
         end)
 
         Connect(prev.MouseButton1Click, function()
+            plist = Players:GetPlayers()
             index = index - 1
-            if index < 1 then index = #players end
+            if index < 1 then index = #plist end
             update()
         end)
 
         Connect(nxt.MouseButton1Click, function()
+            plist = Players:GetPlayers()
             index = index + 1
-            if index > #players then index = 1 end
+            if index > #plist then index = 1 end
             update()
         end)
     end},
 
-    {Name="اشكال", Function=function()
-        Load("https://rawscripts.net/raw/Universal-Script-Zero-Gravity-28484")
-    end},
-
-    {Name="mm2 عربي", Function=function()
-        Load("https://raw.githubusercontent.com/AlphaBay00/PhantomXLoader/main/Ld.lua.txt")
-    end},
-
-    {Name="عربي داخلة سكربتات", Function=function()
-        Load("https://raw.githubusercontent.com/Lakany/MOLYN-DEVELOPMENT/refs/heads/main/README.md")
-    end},
-
-    {Name="vr7", Function=function()
-        Load("https://raw.githubusercontent.com/VR7ss/OMK/refs/heads/main/VR7-ON-TOP")
-    end},
-
-    {Name="تحول سيارة", Function=function()
-        Load("https://pastefy.app/UqDEIOpO/raw")
-    end},
-
-    {Name="حرب تحت الارض", Function=function()
-        Load("https://raw.githubusercontent.com/Roblox-HttpSpy/Random-Silly-stuff/refs/heads/main/UW2-Panel.lua")
-    end},
-
-    {Name="رعب fe", Function=function()
-        Load("https://pastebin.com/raw/C2ixw5i9")
-    end},
-
-    {Name="رقصات 1", Function=function()
-        Load("https://raw.githubusercontent.com/zyrovell/Vexro-Emotes/main/vexroemotes.lua")
-    end},
-
-    {Name="عملاق fe", Function=function()
-        Load("https://pastebin.com/raw/7Nv28tRE")
-    end},
-
-    {Name="afk logs", Function=function()
-        Load("https://raw.githubusercontent.com/93q-f/GhostWalkScript/refs/heads/main/GhostWalkScript")
-    end},
-
-    {Name="امبروطورية النفط", Function=function()
-        Load("https://raw.githubusercontent.com/gumanba/Scripts/main/OilEmpire")
-    end},
-
-    {Name="تحريك الاشياء", Function=function()
-        Load("https://pastefy.app/jZBqvRS7/raw")
-    end},
-
-    {Name="فلكس fps", Function=function()
-        Load("https://raw.githubusercontent.com/Joshingtonn123/JoshScript/refs/heads/main/SyrexhubSniperOrDie")
-    end},
-
-    {Name="تخطي الدكمة", Function=function()
-        Load("https://pastebin.com/raw/RE1hdgBy")
-    end},
-
-    {Name="اختراق الجدار", Function=function()
-        Load("https://pastefy.app/neNjjqht/raw")
-    end},
-
-    {Name="اختفاء", Function=function()
-        Load("https://raw.githubusercontent.com/ymkeee/ArbizHub/refs/heads/main/Invisible.lua")
-    end},
-
-    {Name="اشياء دور حولك", Function=function()
-        Load("https://raw.githubusercontent.com/Gazer-Ha/Tool-orbit/refs/heads/main/Source")
-    end},
-
-    {Name="تسجيل تحركات", Function=function()
-        Load("https://gist.githubusercontent.com/maks1165/58da021266b63d8edc51ef0a3344881d/raw/546fd2b9aec33fd2db8768fa68b7950ff428c651/FlackBack%2520By%25204NTEP")
-    end},
-
-    {Name="رقصات 2", Function=function()
-        Load("https://rawscripts.net/raw/Universal-Script-Emotes-Hub-216227")
-    end},
-
-    {Name="حرب النمل", Function=function()
-        Load("https://raw.githubusercontent.com/ngoanthai639-hash/Ant-war-simple-hub/refs/heads/main/Ant%20war")
-    end},
-
-    {Name="تسلق الجدار", Function=function()
-        Load("https://rawscripts.net/raw/Universal-Script-Wall-Walk-9153")
-    end},
-
-    {Name="Hitbox", Function=function()
-        Load("https://raw.githubusercontent.com/example-prog/Hitbox-Expander/refs/heads/main/RScripter")
-    end},
-
-    {Name="skybox", Function=function()
-        Load("https://raw.githubusercontent.com/VR7ss/VR7/main/vr7ontop")
-    end},
-
-    {Name="خبز او يموت", Function=function()
-        Load("https://rawscripts.net/raw/Bake-or-Die-Kill-All-Bring-Items-Esp-etc-68463")
-    end},
-
-    {Name="تطير الناس", Function=function()
-        Load("https://rawscripts.net/raw/Universal-Script-THE-REAL-dropkick-177199")
-    end},
-
-    {Name="رقصات 3", Function=function()
-        Load("https://raw.githubusercontent.com/7yd7/Hub/refs/heads/Branch/GUIS/Emotes.lua")
-    end},
+    Remote("اشكال", "https://rawscripts.net/raw/Universal-Script-Zero-Gravity-28484"),
+    Remote("mm2 عربي", "https://raw.githubusercontent.com/AlphaBay00/PhantomXLoader/main/Ld.lua.txt"),
+    -- ✅ حذفت زر "عربي داخلة سكربتات": الرابط كان README.md مو سكربت Lua
+    Remote("vr7", "https://raw.githubusercontent.com/VR7ss/OMK/refs/heads/main/VR7-ON-TOP"),
+    Remote("تحول سيارة", "https://pastefy.app/UqDEIOpO/raw"),
+    Remote("حرب تحت الارض", "https://raw.githubusercontent.com/Roblox-HttpSpy/Random-Silly-stuff/refs/heads/main/UW2-Panel.lua"),
+    Remote("رعب fe", "https://pastebin.com/raw/C2ixw5i9"),
+    Remote("رقصات 1", "https://raw.githubusercontent.com/zyrovell/Vexro-Emotes/main/vexroemotes.lua"),
+    Remote("عملاق fe", "https://pastebin.com/raw/7Nv28tRE"),
+    Remote("afk logs", "https://raw.githubusercontent.com/93q-f/GhostWalkScript/refs/heads/main/GhostWalkScript"),
+    Remote("امبروطورية النفط", "https://raw.githubusercontent.com/gumanba/Scripts/main/OilEmpire"),
+    Remote("تحريك الاشياء", "https://pastefy.app/jZBqvRS7/raw"),
+    Remote("فلكس fps", "https://raw.githubusercontent.com/Joshingtonn123/JoshScript/refs/heads/main/SyrexhubSniperOrDie"),
+    Remote("تخطي الدكمة", "https://pastebin.com/raw/RE1hdgBy"),
+    Remote("اختراق الجدار", "https://pastefy.app/neNjjqht/raw"),
+    Remote("اختفاء", "https://raw.githubusercontent.com/ymkeee/ArbizHub/refs/heads/main/Invisible.lua"),
+    Remote("اشياء دور حولك", "https://raw.githubusercontent.com/Gazer-Ha/Tool-orbit/refs/heads/main/Source"),
+    Remote("تسجيل تحركات", "https://gist.githubusercontent.com/maks1165/58da021266b63d8edc51ef0a3344881d/raw/546fd2b9aec33fd2db8768fa68b7950ff428c651/FlackBack%2520By%25204NTEP"),
+    Remote("رقصات 2", "https://rawscripts.net/raw/Universal-Script-Emotes-Hub-216227"),
+    Remote("حرب النمل", "https://raw.githubusercontent.com/ngoanthai639-hash/Ant-war-simple-hub/refs/heads/main/Ant%20war"),
+    Remote("تسلق الجدار", "https://rawscripts.net/raw/Universal-Script-Wall-Walk-9153"),
+    Remote("Hitbox", "https://raw.githubusercontent.com/example-prog/Hitbox-Expander/refs/heads/main/RScripter"),
+    Remote("skybox", "https://raw.githubusercontent.com/VR7ss/VR7/main/vr7ontop"),
+    Remote("خبز او يموت", "https://rawscripts.net/raw/Bake-or-Die-Kill-All-Bring-Items-Esp-etc-68463"),
+    Remote("تطير الناس", "https://rawscripts.net/raw/Universal-Script-THE-REAL-dropkick-177199"),
+    Remote("رقصات 3", "https://raw.githubusercontent.com/7yd7/Hub/refs/heads/Branch/GUIS/Emotes.lua"),
 
     {Name="انتقال للاعبين", Function=function()
-        if p.PlayerGui:FindFirstChild("TeleportGui_Tracked") then
-            p.PlayerGui.TeleportGui_Tracked:Destroy()
+        if PG:FindFirstChild("TeleportGui_Tracked") then
+            PG.TeleportGui_Tracked:Destroy()
             return
         end
 
-        local gui = Instance.new("ScreenGui", p.PlayerGui)
+        local gui = NewInst("ScreenGui", PG)
         gui.Name = "TeleportGui_Tracked"
         gui.ResetOnSpawn = false
-        table.insert(HUB.instances, gui)
 
-        local mainFrame = Instance.new("Frame", gui)
+        local mainFrame = NewInst("Frame", gui)
         mainFrame.Size = UDim2.new(0,210,0,260)
         mainFrame.Position = UDim2.new(0.5,-105,0.5,-130)
         mainFrame.BackgroundColor3 = Color3.fromRGB(30,30,30)
-        Instance.new("UICorner", mainFrame)
+        NewInst("UICorner", mainFrame)
         MakeDraggable(mainFrame)
 
-        local titleBar = Instance.new("TextLabel", mainFrame)
+        local titleBar = NewInst("TextLabel", mainFrame)
         titleBar.Size = UDim2.new(1,-30,0,28)
         titleBar.BackgroundTransparency = 1
         titleBar.Text = "🚀 انتقال للاعبين"
@@ -1249,42 +1553,44 @@ local CF = {
         titleBar.TextSize = 13
         titleBar.Position = UDim2.new(0,8,0,4)
 
-        local refreshBtn = Instance.new("TextButton", mainFrame)
+        local refreshBtn = NewInst("TextButton", mainFrame)
         refreshBtn.Size = UDim2.new(0,22,0,22)
         refreshBtn.Position = UDim2.new(1,-52,0,4)
         refreshBtn.Text = "🔄"
         refreshBtn.BackgroundTransparency = 1
         refreshBtn.TextColor3 = Color3.new(1,1,1)
 
-        local scrollFrame = Instance.new("ScrollingFrame", mainFrame)
+        local scrollFrame = NewInst("ScrollingFrame", mainFrame)
         scrollFrame.Size = UDim2.new(1,-10,1,-40)
         scrollFrame.Position = UDim2.new(0,5,0,35)
         scrollFrame.BackgroundTransparency = 1
         scrollFrame.ScrollBarThickness = 3
         scrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
-        Instance.new("UIListLayout", scrollFrame).Padding = UDim.new(0,5)
-
-        local tpConns = {}
+        scrollFrame.CanvasSize = UDim2.new(0,0,0,0)
+        NewInst("UIListLayout", scrollFrame).Padding = UDim.new(0,5)
 
         local function updatePlayerList()
-            for _,child in pairs(scrollFrame:GetChildren()) do
+            if not scrollFrame.Parent then return end -- ✅ ما نبني أزرار داخل واجهة محذوفة
+            for _, child in ipairs(scrollFrame:GetChildren()) do
                 if child:IsA("TextButton") then
                     child:Destroy()
                 end
             end
 
-            for _, plr in pairs(game.Players:GetPlayers()) do
+            for _, plr in ipairs(Players:GetPlayers()) do
                 if plr ~= p then
-                    local b = Instance.new("TextButton", scrollFrame)
+                    local b = NewInst("TextButton", scrollFrame)
                     b.Size = UDim2.new(1,0,0,30)
                     b.Text = plr.Name
                     b.BackgroundColor3 = Color3.fromRGB(50,50,50)
                     b.TextColor3 = Color3.new(1,1,1)
-                    Instance.new("UICorner", b)
+                    NewInst("UICorner", b)
 
                     b.MouseButton1Click:Connect(function()
-                        if plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
-                            p.Character.HumanoidRootPart.CFrame = plr.Character.HumanoidRootPart.CFrame
+                        local theirs = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+                        local mine = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+                        if theirs and mine then
+                            mine.CFrame = theirs.CFrame
                             ShowToast("✅ انتقلت لـ "..plr.Name, 0.8)
                         else
                             ShowToast("❌ اللاعب غير موجود", 0.8, "error")
@@ -1296,20 +1602,23 @@ local CF = {
 
         refreshBtn.MouseButton1Click:Connect(updatePlayerList)
         updatePlayerList()
-        table.insert(tpConns, game.Players.PlayerAdded:Connect(updatePlayerList))
-        table.insert(tpConns, game.Players.PlayerRemoving:Connect(updatePlayerList))
 
-        local closeBtn = Instance.new("TextButton", mainFrame)
+        -- ✅ الاتصالات تنفصل مهما انحذفت الواجهة (X، الزر الرئيسي، التنظيف)
+        local tpConns = {
+            Players.PlayerAdded:Connect(updatePlayerList),
+            Players.PlayerRemoving:Connect(function() task.defer(updatePlayerList) end),
+        }
+        gui.Destroying:Connect(function()
+            for _, c in ipairs(tpConns) do pcall(function() c:Disconnect() end) end
+        end)
+
+        local closeBtn = NewInst("TextButton", mainFrame)
         closeBtn.Size = UDim2.new(0,22,0,22)
         closeBtn.Position = UDim2.new(1,-26,0,4)
         closeBtn.Text = "X"
         closeBtn.BackgroundTransparency = 1
         closeBtn.TextColor3 = Color3.fromRGB(255,80,80)
-
         closeBtn.MouseButton1Click:Connect(function()
-            for _, c in ipairs(tpConns) do
-                c:Disconnect()
-            end
             gui:Destroy()
         end)
     end},
@@ -1320,14 +1629,19 @@ local CF = {
             settings().Rendering.QualityLevel = 1
             game.Lighting.GlobalShadows = false
             game.Lighting.FogEnd = 1e9
-            for _, v in next, workspace:GetDescendants() do
-                if v:IsA("BasePart") then
-                    v.Material = Enum.Material.SmoothPlastic
-                    v.Reflectance = 0
-                elseif v:IsA("Decal") or v:IsA("Texture") then
-                    v:Destroy()
-                elseif v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Fire") or v:IsA("Smoke") then
+            local n = 0
+            for _, v in ipairs(workspace:GetDescendants()) do
+                n += 1
+                if n % 500 == 0 then task.wait() end -- ✅ ما يجمّد اللعبة
+                if v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Fire") or v:IsA("Smoke") then
                     v.Enabled = false
+                elseif not inCharacter(v) then -- ✅ ما يلمس الشخصيات (وجوه اللاعبين والـ NPC)
+                    if v:IsA("BasePart") then
+                        v.Material = Enum.Material.SmoothPlastic
+                        v.Reflectance = 0
+                    elseif v:IsA("Decal") or v:IsA("Texture") then
+                        v.Transparency = 1 -- ✅ إخفاء بدل حذف
+                    end
                 end
             end
         end, "AntiLag")
@@ -1339,6 +1653,7 @@ local CF = {
         local LT = game.Lighting
         SafeCall(function()
             if HUB.state.night then
+                HUB.fullbright = false
                 LT.ClockTime = 18.5
                 LT.Brightness = 2
                 LT.Ambient = Color3.fromRGB(80,80,100)
@@ -1359,87 +1674,44 @@ local CF = {
         OpenSaveMenu()
     end},
 
-    {Name="👻 كابوس لوري", Function=function()
-        ShowToast("⏳ جاري تحميل كابوس لوري...", 1, "info")
-        pcall(function()
-            loadstring(game:HttpGet("https://pastefy.app/GSWBSY2v/raw"))()
-            ShowToast("✅ تم تحميل كابوس لوري!", 1.5, "success")
-        end)
-    end},
-
-    {Name="🌊 استأناف البحيرة", Function=function()
-        ShowToast("⏳ جاري تحميل استأناف البحيرة...", 1, "info")
-        pcall(function()
-            loadstring(game:HttpGet("https://raw.githubusercontent.com/gumanba/Scripts/main/DraintheLake"))()
-            ShowToast("✅ تم تحميل استأناف البحيرة!", 1.5, "success")
-        end)
-    end},
-
-    {Name="🔪 MM2", Function=function()
-        ShowToast("⏳ جاري تحميل MM2...", 1, "info")
-        pcall(function()
-            loadstring(game:HttpGet("https://raw.githubusercontent.com/xv3gasx/Murder-Mystery-2/refs/heads/main/Release.lua"))()
-            ShowToast("✅ تم تحميل MM2!", 1.5, "success")
-        end)
-    end},
-
-    {Name="🐝 السرب النهائي", Function=function()
-        ShowToast("⏳ جاري تحميل السرب النهائي...", 1, "info")
-        pcall(function()
-            loadstring(game:HttpGet("https://raw.githubusercontent.com/gumanba/Scripts/main/FinalSwarm"))()
-            ShowToast("✅ تم تحميل السرب النهائي!", 1.5, "success")
-        end)
-    end},
-
-    {Name="مستشفى الوحوش 🏥", Function=function()
-        Load("https://raw.githubusercontent.com/gumanba/Scripts/main/AnimalHospital")
-    end},
-
-    {Name="قيادة مطعم", Function=function()
-        Load("https://raw.githubusercontent.com/feasthax/loader/refs/heads/main/RunARestaraunt.lua")
-    end},
-
-    {Name="بيانو 🎹", Function=function()
-        Load("https://hellohellohell0.com/talentless-raw/TALENTLESS.lua")
-    end},
-
-    {Name="ماب كيبورد", Function=function()
-        Load("https://raw.githubusercontent.com/Fluxyyy333/HoshiOnTop/main/loader.lua")
-    end},
+    Remote("👻 كابوس لوري", "https://pastefy.app/GSWBSY2v/raw"),
+    Remote("🌊 استأناف البحيرة", "https://raw.githubusercontent.com/gumanba/Scripts/main/DraintheLake"),
+    Remote("🔪 MM2", "https://raw.githubusercontent.com/xv3gasx/Murder-Mystery-2/refs/heads/main/Release.lua"),
+    Remote("🐝 السرب النهائي", "https://raw.githubusercontent.com/gumanba/Scripts/main/FinalSwarm"),
+    Remote("مستشفى الوحوش 🏥", "https://raw.githubusercontent.com/gumanba/Scripts/main/AnimalHospital"),
+    Remote("قيادة مطعم", "https://raw.githubusercontent.com/feasthax/loader/refs/heads/main/RunARestaraunt.lua"),
+    Remote("بيانو 🎹", "https://hellohellohell0.com/talentless-raw/TALENTLESS.lua"),
+    Remote("ماب كيبورد", "https://raw.githubusercontent.com/Fluxyyy333/HoshiOnTop/main/loader.lua"),
 
     {Name="Anti-AFK 🟢", Toggle=true, Function=function()
         HUB.state.afk = not HUB.state.afk
         if HUB.state.afk then
-            HUB.afkIdleConn = TrackConn(p.Idled:Connect(function()
+            HUB.afkIdleConn = Connect(p.Idled, function()
                 pcall(function()
                     VU:CaptureController()
                     VU:ClickButton2(Vector2.new())
                 end)
-            end))
+            end)
             HUB.afkLoopConn = Connect(RS.Heartbeat, function()
                 if not HUB.state.afk then return end
-                SafeCall(function()
-                    local h = p.Character and p.Character:FindFirstChild("Humanoid")
-                    if h and ((HUB.afkLast or 0) + 240 < tick()) then
+                local h = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+                if h and (HUB.afkLast + 240 < tick()) then
+                    HUB.afkLast = tick() -- ✅ قبل الانتظار، مو بعده
+                    task.spawn(function()
                         h:Move(Vector3.new(0.1,0,0), false)
                         task.wait(0.1)
                         h:Move(Vector3.new(0,0,0), false)
-                        HUB.afkLast = tick()
-                    end
-                end, "AntiAFK")
+                    end)
+                end
             end)
             ShowToast("✅ Anti-AFK شغّال", 1.2)
         else
             if HUB.afkIdleConn then
-                pcall(function()
-                    HUB.afkIdleConn:Disconnect()
-                end)
+                pcall(function() HUB.afkIdleConn:Disconnect() end)
                 HUB.afkIdleConn = nil
             end
             if HUB.afkLoopConn then
-                pcall(function()
-                    HUB.afkLoopConn:Disconnect()
-                end)
+                pcall(function() HUB.afkLoopConn:Disconnect() end)
                 HUB.afkLoopConn = nil
             end
             ShowToast("❌ Anti-AFK متوقف", 1.2, "warn")
@@ -1447,12 +1719,12 @@ local CF = {
     end},
 
     {Name="كشف الأدمن 🔍", Function=function()
-        if p.PlayerGui:FindFirstChild("AdminGui") then
-            p.PlayerGui.AdminGui:Destroy()
+        if PG:FindFirstChild("AdminGui") then
+            PG.AdminGui:Destroy()
             return
         end
 
-        local gui = NewInst("ScreenGui", p.PlayerGui)
+        local gui = NewInst("ScreenGui", PG)
         gui.Name = "AdminGui"
         gui.ResetOnSpawn = false
 
@@ -1496,34 +1768,47 @@ local CF = {
 
         local function isAdmin(plr)
             local reasons = {}
-            if plr.UserId == game.CreatorId then
-                table.insert(reasons, "صاحب اللعبة")
+
+            -- ✅ CreatorId يكون ID جروب في ألعاب الجروبات
+            if game.CreatorType == Enum.CreatorType.User then
+                if plr.UserId == game.CreatorId then
+                    table.insert(reasons, "صاحب اللعبة")
+                end
+            else
+                local ok, rank = pcall(function()
+                    return plr:GetRankInGroup(game.CreatorId)
+                end)
+                if ok and rank >= 255 then
+                    table.insert(reasons, "صاحب الجروب")
+                end
             end
-            if plr:FindFirstChild("leaderstats") then
-                for _, st in pairs(plr.leaderstats:GetChildren()) do
-                    local s = st.Name:lower()
-                    if (s:find("admin") or s:find("role") or s:find("level")) and st:IsA("IntValue") and st.Value > 50 then
+
+            -- ✅ شلت "level" و"role" (كانت تعطي false positive لأي لاعب لفله عالي)
+            local ls = plr:FindFirstChild("leaderstats")
+            if ls then
+                for _, st in ipairs(ls:GetChildren()) do
+                    if st:IsA("IntValue") and st.Name:lower():find("admin") and st.Value > 0 then
                         table.insert(reasons, "Stat: "..st.Name.." = "..st.Value)
                     end
                 end
             end
+
             local tools = {}
-            if plr.Backpack then
-                for _, t in pairs(plr.Backpack:GetChildren()) do
-                    table.insert(tools, t)
-                end
+            local bp = plr:FindFirstChildOfClass("Backpack")
+            if bp then
+                for _, t in ipairs(bp:GetChildren()) do table.insert(tools, t) end
             end
             if plr.Character then
-                for _, t in pairs(plr.Character:GetChildren()) do
-                    if t:IsA("Tool") then
-                        table.insert(tools, t)
-                    end
+                for _, t in ipairs(plr.Character:GetChildren()) do
+                    if t:IsA("Tool") then table.insert(tools, t) end
                 end
             end
-            for _, t in pairs(tools) do
+            for _, t in ipairs(tools) do
                 if t:IsA("Tool") then
                     local n = t.Name:lower()
-                    if n:find("ban") or n:find("kick") or (n:find("admin") and not n:find("fake")) or n:find("cmd") then
+                    -- ✅ كلمة كاملة بدل find (عشان "banana" و"kickboard" ما تطلع أدمن)
+                    if n:find("%f[%a]ban%f[%A]") or n:find("%f[%a]kick%f[%A]")
+                        or (n:find("admin") and not n:find("fake")) or n:find("cmd") then
                         table.insert(reasons, "أداة: "..t.Name)
                     end
                 end
@@ -1532,7 +1817,8 @@ local CF = {
         end
 
         local found = 0
-        for _, plr in pairs(game.Players:GetPlayers()) do
+        local all = Players:GetPlayers()
+        for _, plr in ipairs(all) do
             local isAdm, reasons = isAdmin(plr)
             local color = isAdm and Color3.fromRGB(255,80,80) or Color3.fromRGB(50,180,50)
             local icon = isAdm and "⚠️" or "✅"
@@ -1547,23 +1833,19 @@ local CF = {
             lbl.TextWrapped = true
             NewInst("UIPadding", lbl).PaddingLeft = UDim.new(0,6)
             NewInst("UICorner", lbl).CornerRadius = UDim.new(0,5)
-            if isAdm then
-                found = found + 1
-            end
+            if isAdm then found += 1 end
         end
-        title.Text = "🔍 أدمن: "..found.." / "..#game.Players:GetPlayers()
+        title.Text = "🔍 أدمن: "..found.." / "..#all
     end},
 
-    {Name="ماب الصواريخ 🚀", Function=function()
-        Load("https://raw.githubusercontent.com/gumanba/Scripts/main/MergeaNuke")
-    end},
+    Remote("ماب الصواريخ 🚀", "https://raw.githubusercontent.com/gumanba/Scripts/main/MergeaNuke"),
+    Remote("ماب الليمون 🍋", "https://raw.githubusercontent.com/yhmani76-ux/SoYo/refs/heads/main/SoYo%20sell%20lemon.lua"),
+    Remote("ماب المزرعة 2 🌾", "https://api.luarmor.net/files/v4/loaders/359e97f8618e9008afe5f496184ebb7c.lua"),
 
-    {Name="ماب الليمون 🍋", Function=function()
-        Load("https://raw.githubusercontent.com/yhmani76-ux/SoYo/refs/heads/main/SoYo%20sell%20lemon.lua")
-    end},
-
-    {Name="ماب المزرعة 2 🌾", Function=function()
-        Load("https://api.luarmor.net/files/v4/loaders/359e97f8618e9008afe5f496184ebb7c.lua")
+    {Name="إعادة دخول 🔄", Function=Rejoin},
+    {Name="سيرفر جديد 🌐", Function=ServerHop},
+    {Name="FOV / إضاءة 🔆", Function=function()
+        OpenVisualUI()
     end},
 
     {Name="🧹 تنظيف الكل", Function=function()
@@ -1604,8 +1886,8 @@ local function AddButton(parent, data)
         task.wait(0.05)
         b.BackgroundColor3 = Color3.fromRGB(50,50,50)
         b.TextColor3 = Color3.new(1,1,1)
-        SafeCall(data.Function, data.Name)
-        if data.Toggle then
+        local ok = SafeCall(data.Function, data.Name)
+        if data.Toggle and ok and b.Parent then -- ✅ ما نقلب الحالة إذا الدالة فشلت أو انحذفت الواجهة
             HUB.state[data.Name] = not HUB.state[data.Name]
             stroke.Enabled = true
             stroke.Color = HUB.state[data.Name] and Color3.fromRGB(50,255,50) or Color3.fromRGB(180,50,50)
@@ -1653,7 +1935,7 @@ do
         NewInst("UICorner", lbl).CornerRadius = UDim.new(0,6)
     end
 
-    AddInfo("⭐ HUSSEIN HUB v14.2", Color3.fromRGB(255,255,0))
+    AddInfo("⭐ HUSSEIN HUB v14.4", Color3.fromRGB(255,255,0))
     AddInfo("👨‍💻 المطور: Hussein", Color3.fromRGB(100,200,255))
     AddInfo("📦 السكربتات: "..#CF, Color3.fromRGB(150,255,150))
     CreateTab("Credits", creditsPage)
@@ -1664,7 +1946,7 @@ end
 -- ─────────────────────────────────────────────────────
 
 MakeDraggable(F, T)
-MakeDraggable(TB)
+local tbDragged = MakeDraggable(TB)
 
 local function OpenUI()
     F.Visible = true
@@ -1680,7 +1962,10 @@ local function ToggleUI()
     end
 end
 
-Connect(TB.MouseButton1Click, ToggleUI)
+Connect(TB.MouseButton1Click, function()
+    if tbDragged() then return end -- ✅ السحب ما يفتح/يسكر القائمة
+    ToggleUI()
+end)
 
 Connect(U.InputBegan, function(input, gpe)
     if gpe then return end
@@ -1690,5 +1975,5 @@ Connect(U.InputBegan, function(input, gpe)
 end)
 
 OpenUI()
-ShowToast("✅ Hussein Hub v14.2 محمّل!", 2, "success")
-ShowToast("👋 أهلاً ".. p.Name, 2.5, "info")
+ShowToast("✅ Hussein Hub v14.4 محمّل!", 2, "success")
+ShowToast("👋 أهلاً "..p.Name, 2.5, "info")
