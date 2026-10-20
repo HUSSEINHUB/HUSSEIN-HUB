@@ -1,7 +1,7 @@
 --[[
 ╔══════════════════════════════════════════════════╗
-║ HUSSEIN HUB v14.4 (Fixed)                        ║
-║ • NoClip، نقر انتقال، قفز، Rejoin، FOV، أماكن بأسماء      ║
+║ HUSSEIN HUB v14.7 (Fixed)                        ║
+║ • Hitbox بقائمة (تشغيل، حجم، لون)      ║
 ╚══════════════════════════════════════════════════╝
 ]]
 
@@ -11,7 +11,7 @@ local U = game:GetService("UserInputService")
 local TS = game:GetService("TweenService")
 local RS = game:GetService("RunService")
 local VU = game:GetService("VirtualUser")
-local g = "HusseinHub_v14.4"
+local g = "HusseinHub_v14.7"
 local PG = p:WaitForChild("PlayerGui")
 
 -- ─────────────────────────────────────────────────────
@@ -116,6 +116,8 @@ local function CleanupAll()
     end
 
     if HUB.restoreNoclip then pcall(HUB.restoreNoclip) end
+    if HUB.restoreHitbox then pcall(HUB.restoreHitbox) end
+    if HUB.restoreAntiLag then task.spawn(HUB.restoreAntiLag) end
     pcall(function()
         local cam = workspace.CurrentCamera
         if HUB.fovOn and cam and HUB.originalFOV then
@@ -127,7 +129,7 @@ local function CleanupAll()
 
     HUB.state = {} -- ✅ يمسح الحالة
     HUB.infJumpConn, HUB.afkIdleConn, HUB.afkLoopConn, HUB.espGui = nil, nil, nil, nil
-    HUB.noclipConn, HUB.ctpConns = nil, nil
+    HUB.noclipConn, HUB.ctpConns, HUB.visualConn, HUB.hitboxConn = nil, nil, nil, nil
     getgenv().HusseinHubRunning = false
     print("✅ تم التنظيف")
 end
@@ -181,8 +183,8 @@ local KIND = {
 
 local function inferKind(text)
     text = tostring(text)
-    if text:find("❌") or text:find("رفض") or text:find("غير مسموح") then return "error" end
     if text:find("⚠️") or text:find("بالفعل") or text:find("متوقف") then return "warn" end
+    if text:find("❌") or text:find("رفض") or text:find("غير مسموح") then return "error" end
     if text:find("⏳") or text:find("👋") or text:find("🚀") then return "info" end
     return "success"
 end
@@ -364,7 +366,7 @@ L.Size = UDim2.new(0, 220, 1, 0)
 L.Font = Enum.Font.GothamBold
 L.TextColor3 = Color3.fromRGB(255,255,0)
 L.TextSize = 16
-L.Text = "HUSSEIN HUB v14.4 ⭐"
+L.Text = "HUSSEIN HUB v14.7 ⭐"
 L.TextXAlignment = Enum.TextXAlignment.Left
 
 local function CloseUI()
@@ -502,6 +504,10 @@ local HttpService = game:GetService("HttpService")
 HUB.fovOn = false
 HUB.fullbright = false
 HUB.noclipOriginal = {}
+HUB.noclipConn, HUB.ctpConns, HUB.visualConn, HUB.antiLag = nil, nil, nil, nil
+HUB.hitboxConn = nil
+HUB.hitboxOriginal = setmetatable({}, {__mode = "k"})
+HUB.hitboxCfg = {size = 15, vec = Vector3.new(15, 15, 15), color = Color3.fromRGB(255, 0, 0)}
 HUB.originalFOV = workspace.CurrentCamera and workspace.CurrentCamera.FieldOfView
 
 local stats = {
@@ -1007,8 +1013,8 @@ local function restoreLighting()
     end
 end
 
--- يثبّت FOV والإضاءة لو اللعبة حاولت تغيّرها
-Connect(RS.RenderStepped, function()
+-- يثبّت FOV والإضاءة لو اللعبة حاولت تغيّرها (الحلقة تشتغل بس وقت التفعيل)
+local function visualStep()
     if HUB.fovOn then
         local cam = workspace.CurrentCamera
         if cam and cam.FieldOfView ~= HUB.fov then
@@ -1018,7 +1024,17 @@ Connect(RS.RenderStepped, function()
     if HUB.fullbright then
         applyFullbright()
     end
-end)
+end
+
+local function refreshVisualLoop()
+    local need = HUB.fovOn or HUB.fullbright
+    if need and not HUB.visualConn then
+        HUB.visualConn = Connect(RS.RenderStepped, visualStep)
+    elseif not need and HUB.visualConn then
+        pcall(function() HUB.visualConn:Disconnect() end)
+        HUB.visualConn = nil
+    end
+end
 
 local function OpenVisualUI()
     local guiName = g.."_VisualUI"
@@ -1120,6 +1136,7 @@ local function OpenVisualUI()
         local v = math.floor(FOV_MIN + f * (FOV_MAX - FOV_MIN) + 0.5)
         HUB.fov = v
         HUB.fovOn = true
+        refreshVisualLoop()
         local c = workspace.CurrentCamera
         if c then c.FieldOfView = v end
         showFov(v)
@@ -1174,6 +1191,7 @@ local function OpenVisualUI()
 
     Connect(resetBtn.MouseButton1Click, function()
         HUB.fovOn = false
+        refreshVisualLoop()
         local c = workspace.CurrentCamera
         if c and HUB.originalFOV then
             c.FieldOfView = HUB.originalFOV
@@ -1188,6 +1206,7 @@ local function OpenVisualUI()
         else
             restoreLighting()
         end
+        refreshVisualLoop()
         showFb()
     end)
 end
@@ -1205,9 +1224,332 @@ local function inCharacter(v)
     return m ~= nil and m:FindFirstChildOfClass("Humanoid") ~= nil
 end
 
+-- الغاء لاق: يحفظ القيم الأصلية عشان الضغط الثاني يرجّعها
+local function restoreAntiLag()
+    local saved = HUB.antiLag
+    if not saved then return end
+    HUB.antiLag = nil
+    while saved.busy do task.wait() end -- لو التطبيق لسه شغال، ننتظره يوقف
+    pcall(function()
+        settings().Rendering.QualityLevel = saved.quality
+        game.Lighting.GlobalShadows = saved.shadows
+        game.Lighting.FogEnd = saved.fogEnd
+    end)
+    local n = 0
+    for inst, props in pairs(saved.items) do
+        if inst.Parent then
+            for prop, value in pairs(props) do
+                pcall(function() inst[prop] = value end)
+            end
+        end
+        n += 1
+        if n % 500 == 0 then task.wait() end
+    end
+end
+HUB.restoreAntiLag = restoreAntiLag
+
+local function applyAntiLag()
+    if HUB.antiLag then restoreAntiLag() end -- بداية نظيفة
+    local saved = {items = {}, busy = true}
+    HUB.antiLag = saved
+    local ok, err = pcall(function()
+        saved.quality = settings().Rendering.QualityLevel
+        saved.shadows = game.Lighting.GlobalShadows
+        saved.fogEnd = game.Lighting.FogEnd
+        settings().Rendering.QualityLevel = 1
+        game.Lighting.GlobalShadows = false
+        game.Lighting.FogEnd = 1e9
+
+        local n = 0
+        for _, v in ipairs(workspace:GetDescendants()) do
+            n += 1
+            if n % 500 == 0 then
+                task.wait() -- ✅ ما يجمّد اللعبة
+                if HUB.antiLag ~= saved then break end -- انضغط تراجع وسط التنفيذ
+            end
+            if v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Fire") or v:IsA("Smoke") then
+                saved.items[v] = {Enabled = v.Enabled}
+                v.Enabled = false
+            elseif not inCharacter(v) then -- ✅ ما يلمس الشخصيات
+                if v:IsA("BasePart") then
+                    saved.items[v] = {Material = v.Material, Reflectance = v.Reflectance}
+                    v.Material = Enum.Material.SmoothPlastic
+                    v.Reflectance = 0
+                elseif v:IsA("Decal") or v:IsA("Texture") then
+                    saved.items[v] = {Transparency = v.Transparency}
+                    v.Transparency = 1
+                end
+            end
+        end
+    end)
+    saved.busy = false
+    if not ok then warn("❌ [AntiLag] "..tostring(err)) end
+end
+
+-- Hitbox: توسيع HumanoidRootPart للاعبين الثانيين (تشغيل/إيقاف بدون إعدادات)
+local HITBOX_COLORS = {
+    Color3.fromRGB(255, 0, 0),
+    Color3.fromRGB(255, 140, 0),
+    Color3.fromRGB(255, 230, 0),
+    Color3.fromRGB(0, 220, 70),
+    Color3.fromRGB(0, 140, 255),
+    Color3.fromRGB(170, 70, 255),
+}
+
+local function restoreHitbox()
+    for hrp, orig in pairs(HUB.hitboxOriginal) do
+        if hrp.Parent then
+            pcall(function()
+                hrp.Size = orig.Size
+                hrp.Transparency = orig.Transparency
+                hrp.Color = orig.Color
+                hrp.CanCollide = orig.CanCollide
+            end)
+        end
+    end
+    HUB.hitboxOriginal = setmetatable({}, {__mode = "k"})
+end
+HUB.restoreHitbox = restoreHitbox
+
+local function SetHitbox(on)
+    if on then
+        if HUB.hitboxConn then return end
+        HUB.hitboxConn = Connect(RS.RenderStepped, function()
+            local cfg = HUB.hitboxCfg
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr ~= p then
+                    local char = plr.Character
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp and (hrp.Size ~= cfg.vec or hrp.Color ~= cfg.color) then
+                        if not HUB.hitboxOriginal[hrp] then
+                            HUB.hitboxOriginal[hrp] = {
+                                Size = hrp.Size,
+                                Transparency = hrp.Transparency,
+                                Color = hrp.Color,
+                                CanCollide = hrp.CanCollide,
+                            }
+                        end
+                        hrp.Size = cfg.vec
+                        hrp.Color = cfg.color
+                        hrp.Transparency = 0.5
+                        hrp.CanCollide = false
+                    end
+                end
+            end
+        end)
+    else
+        if HUB.hitboxConn then
+            pcall(function() HUB.hitboxConn:Disconnect() end)
+            HUB.hitboxConn = nil
+        end
+        restoreHitbox()
+    end
+end
+
+-- شريط سحب عام (يشتغل بالماوس واللمس)
+local function MakeSlider(owner, parent, position, size, minV, maxV, value, onChange)
+    local slider = NewInst("TextButton", parent)
+    slider.Size = size
+    slider.Position = position
+    slider.BackgroundTransparency = 1
+    slider.AutoButtonColor = false
+    slider.Text = ""
+
+    local bar = NewInst("Frame", slider)
+    bar.Size = UDim2.new(1, 0, 0, 6)
+    bar.Position = UDim2.new(0, 0, 0.5, -3)
+    bar.BackgroundColor3 = Color3.fromRGB(60,60,60)
+    bar.BorderSizePixel = 0
+    NewInst("UICorner", bar).CornerRadius = UDim.new(0, 3)
+
+    local fill = NewInst("Frame", bar)
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(255,255,0)
+    fill.BorderSizePixel = 0
+    NewInst("UICorner", fill).CornerRadius = UDim.new(0, 3)
+
+    local knob = NewInst("Frame", bar)
+    knob.Size = UDim2.new(0, 14, 0, 14)
+    knob.AnchorPoint = Vector2.new(0.5, 0.5)
+    knob.Position = UDim2.new(0, 0, 0.5, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    NewInst("UICorner", knob).CornerRadius = UDim.new(0, 7)
+
+    local function show(v)
+        local f = math.clamp((v - minV) / (maxV - minV), 0, 1)
+        fill.Size = UDim2.new(f, 0, 1, 0)
+        knob.Position = UDim2.new(f, 0, 0.5, 0)
+    end
+    show(value)
+
+    local function setFromX(x)
+        local f = math.clamp((x - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
+        local v = math.floor(minV + f * (maxV - minV) + 0.5)
+        show(v)
+        onChange(v)
+    end
+
+    local sliding = false
+    local conns = {
+        slider.InputBegan:Connect(function(i)
+            if isPointer(i) then
+                sliding = true
+                setFromX(i.Position.X)
+            end
+        end),
+        U.InputChanged:Connect(function(i)
+            if sliding and (i.UserInputType == Enum.UserInputType.MouseMovement
+                or i.UserInputType == Enum.UserInputType.Touch) then
+                setFromX(i.Position.X)
+            end
+        end),
+        U.InputEnded:Connect(function(i)
+            if isPointer(i) then sliding = false end
+        end),
+    }
+    owner.Destroying:Connect(function()
+        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    end)
+
+    return slider
+end
+
+local function OpenHitboxUI()
+    local guiName = g.."_HitboxUI"
+    local existing = PG:FindFirstChild(guiName)
+    if existing then
+        existing:Destroy()
+        return
+    end
+
+    local cfg = HUB.hitboxCfg
+
+    local ui = NewInst("ScreenGui", PG)
+    ui.Name = guiName
+    ui.ResetOnSpawn = false
+    ui.DisplayOrder = 104
+
+    local frame = NewInst("Frame", ui)
+    frame.Size = UDim2.new(0, 230, 0, 186)
+    frame.Position = UDim2.new(0.5, -115, 0.25, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(25,25,25)
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    NewInst("UICorner", frame).CornerRadius = UDim.new(0, 10)
+    local stroke = NewInst("UIStroke", frame)
+    stroke.Color = Color3.fromRGB(255,255,0)
+    stroke.Thickness = 1.2
+    stroke.Transparency = 0.2
+    MakeDraggable(frame)
+
+    local title = NewInst("TextLabel", frame)
+    title.Size = UDim2.new(1, -40, 0, 30)
+    title.Position = UDim2.new(0, 10, 0, 2)
+    title.BackgroundTransparency = 1
+    title.Text = "🎯 Hitbox"
+    title.Font = Enum.Font.GothamBold
+    title.TextColor3 = Color3.fromRGB(255,255,0)
+    title.TextSize = 14
+    title.TextXAlignment = Enum.TextXAlignment.Left
+
+    local close = NewInst("TextButton", frame)
+    close.Size = UDim2.new(0, 24, 0, 24)
+    close.Position = UDim2.new(1, -30, 0, 5)
+    close.Text = "✕"
+    close.BackgroundColor3 = Color3.fromRGB(60,60,60)
+    close.TextColor3 = Color3.fromRGB(255,80,80)
+    close.Font = Enum.Font.GothamBold
+    close.TextSize = 14
+    NewInst("UICorner", close).CornerRadius = UDim.new(0, 4)
+    Connect(close.MouseButton1Click, function() ui:Destroy() end)
+
+    -- تشغيل / إيقاف
+    local toggle = NewInst("TextButton", frame)
+    toggle.Size = UDim2.new(1, -20, 0, 32)
+    toggle.Position = UDim2.new(0, 10, 0, 38)
+    toggle.Font = Enum.Font.GothamBold
+    toggle.TextSize = 13
+    toggle.TextColor3 = Color3.fromRGB(255,255,255)
+    NewInst("UICorner", toggle).CornerRadius = UDim.new(0, 7)
+
+    local function showToggle()
+        local on = HUB.hitboxConn ~= nil
+        toggle.Text = on and "✅ مفعّل" or "❌ متوقف"
+        toggle.BackgroundColor3 = on and Color3.fromRGB(0,150,0) or Color3.fromRGB(150,0,0)
+    end
+    showToggle()
+
+    Connect(toggle.MouseButton1Click, function()
+        local on = HUB.hitboxConn == nil
+        SetHitbox(on)
+        showToggle()
+        if on then
+            ShowToast("✅ Hitbox مفعّل", 0.8, "success")
+        else
+            ShowToast("❌ Hitbox متوقف", 0.8, "warn")
+        end
+    end)
+
+    -- الحجم
+    local sizeLabel = NewInst("TextLabel", frame)
+    sizeLabel.Size = UDim2.new(1, -20, 0, 18)
+    sizeLabel.Position = UDim2.new(0, 10, 0, 78)
+    sizeLabel.BackgroundTransparency = 1
+    sizeLabel.Text = "الحجم: "..cfg.size
+    sizeLabel.Font = Enum.Font.GothamMedium
+    sizeLabel.TextColor3 = Color3.fromRGB(255,255,255)
+    sizeLabel.TextSize = 12
+    sizeLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+    MakeSlider(ui, frame, UDim2.new(0, 10, 0, 96), UDim2.new(1, -20, 0, 24), 2, 50, cfg.size, function(v)
+        cfg.size = v
+        cfg.vec = Vector3.new(v, v, v)
+        sizeLabel.Text = "الحجم: "..v
+    end)
+
+    -- اللون
+    local colorLabel = NewInst("TextLabel", frame)
+    colorLabel.Size = UDim2.new(1, -20, 0, 18)
+    colorLabel.Position = UDim2.new(0, 10, 0, 126)
+    colorLabel.BackgroundTransparency = 1
+    colorLabel.Text = "اللون"
+    colorLabel.Font = Enum.Font.GothamMedium
+    colorLabel.TextColor3 = Color3.fromRGB(255,255,255)
+    colorLabel.TextSize = 12
+    colorLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+    local swatches = {}
+    local function showColors()
+        for _, s in ipairs(swatches) do
+            s.stroke.Enabled = (s.color == cfg.color)
+        end
+    end
+
+    for i, col in ipairs(HITBOX_COLORS) do
+        local b = NewInst("TextButton", frame)
+        b.Size = UDim2.new(0, 28, 0, 28)
+        b.Position = UDim2.new(0, 11 + (i - 1) * 36, 0, 148)
+        b.BackgroundColor3 = col
+        b.AutoButtonColor = false
+        b.Text = ""
+        NewInst("UICorner", b).CornerRadius = UDim.new(0, 14)
+        local st = NewInst("UIStroke", b)
+        st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        st.Color = Color3.fromRGB(255,255,255)
+        st.Thickness = 2
+        st.Enabled = false
+        table.insert(swatches, {stroke = st, color = col})
+        Connect(b.MouseButton1Click, function()
+            cfg.color = col
+            showColors()
+        end)
+    end
+    showColors()
+end
+
 local CF = {
-    {Name="قفز لانهائي", Toggle=true, Function=function()
-        HUB.state.infJump = not HUB.state.infJump
+    {Name="قفز لانهائي", Id="infJump", Toggle=true, Function=function()
         if HUB.state.infJump then
             HUB.infJumpConn = Connect(U.JumpRequest, function()
                 local h = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
@@ -1233,8 +1575,7 @@ local CF = {
         OpenStatUI("JumpPower")
     end},
 
-    {Name="NoClip", Toggle=true, Function=function()
-        HUB.state.noclip = not HUB.state.noclip
+    {Name="NoClip", Id="noclip", Toggle=true, Function=function()
         SetNoClip(HUB.state.noclip)
         if HUB.state.noclip then
             ShowToast("✅ NoClip مفعّل", 0.8, "success")
@@ -1243,8 +1584,7 @@ local CF = {
         end
     end},
 
-    {Name="نقر انتقال", Toggle=true, Function=function()
-        HUB.state.clickTP = not HUB.state.clickTP
+    {Name="نقر انتقال", Id="clickTP", Toggle=true, Function=function()
         SetClickTP(HUB.state.clickTP)
         if HUB.state.clickTP then
             ShowToast("✅ اضغط على أي مكان للانتقال", 1.2, "success")
@@ -1253,8 +1593,7 @@ local CF = {
         end
     end},
 
-    {Name="ESP", Toggle=true, Function=function()
-        HUB.state.esp = not HUB.state.esp
+    {Name="ESP", Id="esp", Toggle=true, Function=function()
 
         local function cleanupESP()
             for _, c in ipairs(HUB.espConns) do
@@ -1521,7 +1860,9 @@ local CF = {
     Remote("رقصات 2", "https://rawscripts.net/raw/Universal-Script-Emotes-Hub-216227"),
     Remote("حرب النمل", "https://raw.githubusercontent.com/ngoanthai639-hash/Ant-war-simple-hub/refs/heads/main/Ant%20war"),
     Remote("تسلق الجدار", "https://rawscripts.net/raw/Universal-Script-Wall-Walk-9153"),
-    Remote("Hitbox", "https://raw.githubusercontent.com/example-prog/Hitbox-Expander/refs/heads/main/RScripter"),
+    {Name="Hitbox", Function=function()
+        OpenHitboxUI()
+    end},
     Remote("skybox", "https://raw.githubusercontent.com/VR7ss/VR7/main/vr7ontop"),
     Remote("خبز او يموت", "https://rawscripts.net/raw/Bake-or-Die-Kill-All-Bring-Items-Esp-etc-68463"),
     Remote("تطير الناس", "https://rawscripts.net/raw/Universal-Script-THE-REAL-dropkick-177199"),
@@ -1623,37 +1964,23 @@ local CF = {
         end)
     end},
 
-    {Name="الغاء لاق", Function=function()
-        ShowToast("⏳ جاري الغاء اللاق...", 0.5, "info")
-        SafeCall(function()
-            settings().Rendering.QualityLevel = 1
-            game.Lighting.GlobalShadows = false
-            game.Lighting.FogEnd = 1e9
-            local n = 0
-            for _, v in ipairs(workspace:GetDescendants()) do
-                n += 1
-                if n % 500 == 0 then task.wait() end -- ✅ ما يجمّد اللعبة
-                if v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Fire") or v:IsA("Smoke") then
-                    v.Enabled = false
-                elseif not inCharacter(v) then -- ✅ ما يلمس الشخصيات (وجوه اللاعبين والـ NPC)
-                    if v:IsA("BasePart") then
-                        v.Material = Enum.Material.SmoothPlastic
-                        v.Reflectance = 0
-                    elseif v:IsA("Decal") or v:IsA("Texture") then
-                        v.Transparency = 1 -- ✅ إخفاء بدل حذف
-                    end
-                end
-            end
-        end, "AntiLag")
-        ShowToast("✅ تم الغاء اللاق", 1.2)
+    {Name="الغاء لاق", Id="antilag", Toggle=true, Function=function()
+        if HUB.state.antilag then
+            ShowToast("⏳ جاري الغاء اللاق...", 0.5, "info")
+            applyAntiLag()
+            ShowToast("✅ تم الغاء اللاق (اضغط مرة ثانية للتراجع)", 1.5, "success")
+        else
+            task.spawn(restoreAntiLag)
+            ShowToast("↩️ تم التراجع عن الغاء اللاق", 1.2, "warn")
+        end
     end},
 
-    {Name="نهار/ليل", Toggle=true, Function=function()
-        HUB.state.night = not HUB.state.night
+    {Name="نهار/ليل", Id="night", Toggle=true, Function=function()
         local LT = game.Lighting
         SafeCall(function()
             if HUB.state.night then
                 HUB.fullbright = false
+                refreshVisualLoop()
                 LT.ClockTime = 18.5
                 LT.Brightness = 2
                 LT.Ambient = Color3.fromRGB(80,80,100)
@@ -1683,8 +2010,7 @@ local CF = {
     Remote("بيانو 🎹", "https://hellohellohell0.com/talentless-raw/TALENTLESS.lua"),
     Remote("ماب كيبورد", "https://raw.githubusercontent.com/Fluxyyy333/HoshiOnTop/main/loader.lua"),
 
-    {Name="Anti-AFK 🟢", Toggle=true, Function=function()
-        HUB.state.afk = not HUB.state.afk
+    {Name="Anti-AFK 🟢", Id="afk", Toggle=true, Function=function()
         if HUB.state.afk then
             HUB.afkIdleConn = Connect(p.Idled, function()
                 pcall(function()
@@ -1841,6 +2167,7 @@ local CF = {
     Remote("ماب الصواريخ 🚀", "https://raw.githubusercontent.com/gumanba/Scripts/main/MergeaNuke"),
     Remote("ماب الليمون 🍋", "https://raw.githubusercontent.com/yhmani76-ux/SoYo/refs/heads/main/SoYo%20sell%20lemon.lua"),
     Remote("ماب المزرعة 2 🌾", "https://api.luarmor.net/files/v4/loaders/359e97f8618e9008afe5f496184ebb7c.lua"),
+    Remote("سرقة من الاغنياء", "https://raw.githubusercontent.com/gumanba/Scripts/main/StealFromTheRich"),
 
     {Name="إعادة دخول 🔄", Function=Rejoin},
     {Name="سيرفر جديد 🌐", Function=ServerHop},
@@ -1858,7 +2185,8 @@ local CF = {
 -- ─────────────────────────────────────────────────────
 
 local function AddButton(parent, data)
-    local active = HUB.state[data.Name]
+    local id = data.Id or data.Name
+    local active = data.Toggle and HUB.state[id]
     local b = NewInst("TextButton", parent)
     b.BackgroundColor3 = Color3.fromRGB(50,50,50)
     b.Text = data.Name
@@ -1886,11 +2214,18 @@ local function AddButton(parent, data)
         task.wait(0.05)
         b.BackgroundColor3 = Color3.fromRGB(50,50,50)
         b.TextColor3 = Color3.new(1,1,1)
-        local ok = SafeCall(data.Function, data.Name)
-        if data.Toggle and ok and b.Parent then -- ✅ ما نقلب الحالة إذا الدالة فشلت أو انحذفت الواجهة
-            HUB.state[data.Name] = not HUB.state[data.Name]
-            stroke.Enabled = true
-            stroke.Color = HUB.state[data.Name] and Color3.fromRGB(50,255,50) or Color3.fromRGB(180,50,50)
+        if data.Toggle then
+            -- ✅ الزر هو اللي يقلب الحالة قبل ما ينادي الدالة، ويرجّعها إذا فشلت
+            local prev = HUB.state[id]
+            HUB.state[id] = not prev
+            local ok = SafeCall(data.Function, data.Name)
+            if not ok then HUB.state[id] = prev end
+            if b.Parent then
+                stroke.Enabled = true
+                stroke.Color = HUB.state[id] and Color3.fromRGB(50,255,50) or Color3.fromRGB(180,50,50)
+            end
+        else
+            SafeCall(data.Function, data.Name)
         end
     end)
 end
@@ -1935,7 +2270,7 @@ do
         NewInst("UICorner", lbl).CornerRadius = UDim.new(0,6)
     end
 
-    AddInfo("⭐ HUSSEIN HUB v14.4", Color3.fromRGB(255,255,0))
+    AddInfo("⭐ HUSSEIN HUB v14.7", Color3.fromRGB(255,255,0))
     AddInfo("👨‍💻 المطور: Hussein", Color3.fromRGB(100,200,255))
     AddInfo("📦 السكربتات: "..#CF, Color3.fromRGB(150,255,150))
     CreateTab("Credits", creditsPage)
@@ -1975,5 +2310,5 @@ Connect(U.InputBegan, function(input, gpe)
 end)
 
 OpenUI()
-ShowToast("✅ Hussein Hub v14.4 محمّل!", 2, "success")
+ShowToast("✅ Hussein Hub v14.7 محمّل!", 2, "success")
 ShowToast("👋 أهلاً "..p.Name, 2.5, "info")
